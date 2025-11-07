@@ -4,7 +4,6 @@ const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 
-// Configure CORS
 const allowedOrigins = [
   'https://funapp-nu.vercel.app',
   'https://funappbackend.vercel.app',
@@ -19,12 +18,10 @@ app.use(cors({
 
 app.use(express.json());
 
-// Store connected users and their SSE responses
 const users = new Map();
 const waitingUsers = [];
 const userConnections = new Map();
 
-// API health check
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
@@ -47,7 +44,6 @@ app.get('/', (req, res) => {
   });
 });
 
-// SSE endpoint for receiving events
 app.get('/api/events', (req, res) => {
   const userId = req.query.userId;
   
@@ -55,7 +51,6 @@ app.get('/api/events', (req, res) => {
     return res.status(400).json({ error: 'User ID required' });
   }
 
-  // Set headers for SSE
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -64,20 +59,10 @@ app.get('/api/events', (req, res) => {
     'Access-Control-Allow-Credentials': 'true'
   });
 
-  // Send initial heartbeat to establish connection
   res.write('data: ' + JSON.stringify({ type: 'connected', data: { userId } }) + '\n\n');
 
-  // Store the connection
   userConnections.set(userId, res);
 
-  // Add user to system if not already there
-  if (!users.has(userId)) {
-    users.set(userId, { partner: null });
-    waitingUsers.push(userId);
-    pairUsers();
-  }
-
-  // Send periodic heartbeats to keep connection alive
   const heartbeat = setInterval(() => {
     if (userConnections.has(userId)) {
       try {
@@ -90,7 +75,6 @@ app.get('/api/events', (req, res) => {
     }
   }, 30000);
 
-  // Handle client disconnect
   req.on('close', () => {
     console.log('User disconnected:', userId);
     clearInterval(heartbeat);
@@ -98,15 +82,14 @@ app.get('/api/events', (req, res) => {
     
     const user = users.get(userId);
     if (user && user.partner) {
-      // Notify partner about disconnect
       sendToUser(user.partner, { type: 'partner-disconnected' });
       
-      // Remove partner reference
       const partner = users.get(user.partner);
       if (partner) {
         partner.partner = null;
         if (users.has(user.partner)) {
           waitingUsers.push(user.partner);
+          pairUsers();
         }
       }
     }
@@ -116,17 +99,14 @@ app.get('/api/events', (req, res) => {
     if (waitingIndex > -1) {
       waitingUsers.splice(waitingIndex, 1);
     }
-    
-    pairUsers();
   });
 });
 
-// Signaling endpoint for WebRTC offers/answers/ice-candidates
 app.post('/api/signal', (req, res) => {
   try {
     const { userId, type, data } = req.body;
     
-    console.log('Received signal:', { userId, type, data: data ? 'data present' : 'no data' });
+    console.log('Received signal:', { userId, type });
     
     if (!userId || !type) {
       return res.status(400).json({ error: 'User ID and type required' });
@@ -135,8 +115,39 @@ app.post('/api/signal', (req, res) => {
     const user = users.get(userId);
     
     switch (type) {
+      case 'join':
+        if (!users.has(userId)) {
+          users.set(userId, { partner: null, ready: false });
+          waitingUsers.push(userId);
+          console.log('User joined:', userId);
+          pairUsers();
+        }
+        break;
+
+      case 'ready':
+        if (user) {
+          user.ready = true;
+          console.log('User ready:', userId);
+          
+          if (user.partner) {
+            const partner = users.get(user.partner);
+            if (partner && partner.ready) {
+              sendToUser(userId, { 
+                type: 'start-call', 
+                data: { partnerId: user.partner, initiator: true } 
+              });
+              sendToUser(user.partner, { 
+                type: 'start-call', 
+                data: { partnerId: userId, initiator: false } 
+              });
+            }
+          }
+        }
+        break;
+        
       case 'offer':
         if (user && user.partner) {
+          console.log('Relaying offer from', userId, 'to', user.partner);
           sendToUser(user.partner, {
             type: 'offer',
             data: {
@@ -149,6 +160,7 @@ app.post('/api/signal', (req, res) => {
         
       case 'answer':
         if (user && user.partner) {
+          console.log('Relaying answer from', userId, 'to', user.partner);
           sendToUser(user.partner, {
             type: 'answer',
             data: {
@@ -173,25 +185,17 @@ app.post('/api/signal', (req, res) => {
         
       case 'next-user':
         if (user && user.partner) {
-          // Notify current partner
           sendToUser(user.partner, { type: 'partner-disconnected' });
           
-          // Remove partnership
           const partner = users.get(user.partner);
           if (partner) {
             partner.partner = null;
+            partner.ready = false;
             waitingUsers.push(user.partner);
           }
           
           user.partner = null;
-          waitingUsers.push(userId);
-          pairUsers();
-        }
-        break;
-        
-      case 'join':
-        if (!users.has(userId)) {
-          users.set(userId, { partner: null });
+          user.ready = false;
           waitingUsers.push(userId);
           pairUsers();
         }
@@ -201,7 +205,7 @@ app.post('/api/signal', (req, res) => {
         console.log('Unknown signal type:', type);
     }
 
-    res.json({ status: 'ok', message: 'Signal processed' });
+    res.json({ status: 'ok' });
   } catch (error) {
     console.error('Error processing signal:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -212,9 +216,8 @@ function sendToUser(userId, message) {
   const connection = userConnections.get(userId);
   if (connection && !connection.finished) {
     try {
-      const messageStr = 'data: ' + JSON.stringify(message) + '\n\n';
-      connection.write(messageStr);
-      console.log('Sent to user', userId, ':', message.type);
+      connection.write('data: ' + JSON.stringify(message) + '\n\n');
+      console.log('Sent to', userId, ':', message.type);
     } catch (error) {
       console.error('Error sending to user:', userId, error);
       userConnections.delete(userId);
@@ -244,12 +247,11 @@ function pairUsers() {
         data: { partnerId: user1 } 
       });
       
-      console.log(`Paired users: ${user1} with ${user2}`);
+      console.log(`Paired: ${user1} <-> ${user2}`);
     }
   }
 }
 
-// Generate user ID endpoint
 app.get('/api/user-id', (req, res) => {
   const userId = uuidv4();
   res.json({ userId });
@@ -257,12 +259,10 @@ app.get('/api/user-id', (req, res) => {
 
 const PORT = process.env.PORT || 5000;
 
-// Export for Vercel
 module.exports = app;
 
 if (!process.env.VERCEL) {
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
-    console.log('Allowed origins:', allowedOrigins);
   });
 }

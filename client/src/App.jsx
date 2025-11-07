@@ -4,10 +4,7 @@ import './App.css';
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' }
+    { urls: 'stun:stun1.l.google.com:19302' }
   ]
 };
 
@@ -25,46 +22,72 @@ function App() {
   const peerConnectionRef = useRef(null);
   const eventSourceRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
+  const pendingCandidatesRef = useRef([]);
 
   useEffect(() => {
     initializeUser();
     
     return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-      }
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-      if (peerConnectionRef.current) {
-        peerConnectionRef.current.close();
-      }
+      cleanup();
     };
   }, []);
+
+  const cleanup = () => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+    }
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+    }
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+    }
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => track.stop());
+    }
+  };
 
   const initializeUser = async () => {
     try {
       setStatus('Getting user ID...');
       
-      // Get a user ID from server
       const response = await fetch(`${SERVER_URL}/api/user-id`);
       const data = await response.json();
       
       const newUserId = data.userId;
       setUserId(newUserId);
-      setStatus('User ID received. Connecting...');
       
-      // Connect to events stream first
+      await initializeMedia();
       connectEventSource(newUserId);
       
     } catch (error) {
-      console.error('Error initializing user:', error);
+      console.error('Error initializing:', error);
       setStatus('Failed to initialize. Retrying...');
       
       reconnectTimeoutRef.current = setTimeout(() => {
-        reconnectTimeoutRef.current = null;
         initializeUser();
       }, 3000);
+    }
+  };
+
+  const initializeMedia = async () => {
+    try {
+      setStatus('Requesting camera and microphone...');
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: { echoCancellation: true, noiseSuppression: true }
+      });
+      
+      localStreamRef.current = stream;
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+      setStatus('Media ready!');
+      return true;
+    } catch (error) {
+      console.error('Error accessing media:', error);
+      setStatus('Error: Cannot access camera/microphone');
+      return false;
     }
   };
 
@@ -80,17 +103,11 @@ function App() {
       eventSourceRef.current = eventSource;
 
       eventSource.onopen = () => {
-        console.log('✅ EventSource connected successfully');
-        setStatus('Connected! Waiting for a partner...');
+        console.log('✅ EventSource connected');
+        setStatus('Connected! Looking for partner...');
         setIsConnected(true);
         
-        // Join the chat system after connection is established
         sendSignal('join', {}, userId);
-        
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-          reconnectTimeoutRef.current = null;
-        }
       };
 
       eventSource.onmessage = (event) => {
@@ -98,7 +115,7 @@ function App() {
           const data = JSON.parse(event.data);
           handleServerEvent(data);
         } catch (error) {
-          console.error('Error parsing server event:', error);
+          console.error('Error parsing event:', error);
         }
       };
 
@@ -112,185 +129,133 @@ function App() {
         if (!reconnectTimeoutRef.current) {
           reconnectTimeoutRef.current = setTimeout(() => {
             reconnectTimeoutRef.current = null;
-            if (userId) {
-              connectEventSource(userId);
-            }
+            connectEventSource(userId);
           }, 3000);
         }
       };
 
     } catch (error) {
       console.error('Error creating EventSource:', error);
-      setStatus('Failed to connect. Retrying...');
-      
-      reconnectTimeoutRef.current = setTimeout(() => {
-        reconnectTimeoutRef.current = null;
-        if (userId) {
-          connectEventSource(userId);
-        }
-      }, 3000);
     }
   };
 
-  const handleServerEvent = (data) => {
-    console.log('Received server event:', data.type);
+  const handleServerEvent = async (data) => {
+    console.log('Event:', data.type);
     
     switch (data.type) {
       case 'connected':
-        console.log('Connected to server with ID:', data.data.userId);
+        console.log('Connected with ID:', data.data.userId);
         break;
         
       case 'user-connected':
-        console.log('Partner connected:', data.data.partnerId);
+        console.log('Partner found:', data.data.partnerId);
         setPartnerId(data.data.partnerId);
-        setStatus('Partner connected! Setting up video call...');
-        createPeerConnection().then(() => createOffer());
+        setStatus('Partner found! Preparing video call...');
+        sendSignal('ready', {});
+        break;
+
+      case 'start-call':
+        console.log('Starting call, initiator:', data.data.initiator);
+        setStatus('Setting up video call...');
+        await createPeerConnection();
+        if (data.data.initiator) {
+          await createOffer();
+        }
         break;
         
       case 'offer':
-        console.log('Received offer from:', data.data.from);
-        setPartnerId(data.data.from);
-        setStatus('Incoming call! Setting up video...');
-        createPeerConnection().then(() => handleOffer(data.data.offer));
+        console.log('Received offer');
+        setStatus('Incoming call...');
+        await createPeerConnection();
+        await handleOffer(data.data.offer);
         break;
         
       case 'answer':
-        console.log('Received answer from partner');
-        handleAnswer(data.data.answer);
+        console.log('Received answer');
+        await handleAnswer(data.data.answer);
         break;
         
       case 'ice-candidate':
-        console.log('Received ICE candidate');
-        handleNewICECandidate(data.data.candidate);
+        await handleNewICECandidate(data.data.candidate);
         break;
         
       case 'partner-disconnected':
         console.log('Partner disconnected');
-        setStatus('Partner disconnected. Waiting for new partner...');
-        setPartnerId('');
-        if (peerConnectionRef.current) {
-          peerConnectionRef.current.close();
-          peerConnectionRef.current = null;
-        }
+        setStatus('Partner disconnected. Looking for new partner...');
+        resetConnection();
         break;
         
       case 'heartbeat':
-        // Keep connection alive
         break;
         
       default:
-        console.log('Unknown event type:', data.type);
+        console.log('Unknown event:', data.type);
     }
   };
 
   const sendSignal = async (type, data = {}, targetUserId = userId) => {
     try {
-      console.log('Sending signal:', type, 'for user:', targetUserId);
-      
-      const response = await fetch(`${SERVER_URL}/api/signal`, {
+      await fetch(`${SERVER_URL}/api/signal`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           userId: targetUserId,
           type: type,
           data: data
         })
       });
-      
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.error('Server error:', errorData);
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      
-      const result = await response.json();
-      console.log('Signal sent successfully:', type);
-      return result;
     } catch (error) {
       console.error('Error sending signal:', error);
-      throw error;
-    }
-  };
-
-  const initializeMedia = async () => {
-    try {
-      setStatus('Requesting camera and microphone access...');
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        },
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true
-        }
-      });
-      
-      localStreamRef.current = stream;
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
-      setStatus('Camera and microphone ready!');
-      return true;
-    } catch (error) {
-      console.error('Error accessing media devices:', error);
-      setStatus('Error: Cannot access camera/microphone. Please check permissions.');
-      return false;
     }
   };
 
   const createPeerConnection = async () => {
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+    }
+
     if (!localStreamRef.current) {
-      const mediaSuccess = await initializeMedia();
-      if (!mediaSuccess) return false;
+      await initializeMedia();
     }
 
     try {
-      const peerConnection = new RTCPeerConnection(ICE_SERVERS);
+      const pc = new RTCPeerConnection(ICE_SERVERS);
       
-      // Add local stream to peer connection
       localStreamRef.current.getTracks().forEach(track => {
-        peerConnection.addTrack(track, localStreamRef.current);
+        pc.addTrack(track, localStreamRef.current);
       });
 
-      // Handle incoming remote stream
-      peerConnection.ontrack = (event) => {
-        console.log('Received remote stream');
+      pc.ontrack = (event) => {
+        console.log('Remote stream received');
         if (remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = event.streams[0];
         }
         setStatus('Video call connected!');
       };
 
-      // Handle ICE candidates
-      peerConnection.onicecandidate = (event) => {
+      pc.onicecandidate = (event) => {
         if (event.candidate) {
-          console.log('Sending ICE candidate');
-          sendSignal('ice-candidate', { candidate: event.candidate }).catch(console.error);
+          sendSignal('ice-candidate', { candidate: event.candidate });
         }
       };
 
-      peerConnection.onconnectionstatechange = () => {
-        console.log('Peer connection state:', peerConnection.connectionState);
-        switch (peerConnection.connectionState) {
-          case 'connected':
-            setStatus('Video call connected!');
-            break;
-          case 'disconnected':
-          case 'failed':
-            setStatus('Connection issues. Trying to reconnect...');
-            break;
+      pc.onconnectionstatechange = () => {
+        console.log('Connection state:', pc.connectionState);
+        if (pc.connectionState === 'connected') {
+          setStatus('Video call connected!');
+        } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+          setStatus('Connection issue...');
         }
       };
 
-      peerConnectionRef.current = peerConnection;
-      return true;
+      pc.oniceconnectionstatechange = () => {
+        console.log('ICE state:', pc.iceConnectionState);
+      };
+
+      peerConnectionRef.current = pc;
+      pendingCandidatesRef.current = [];
     } catch (error) {
       console.error('Error creating peer connection:', error);
-      setStatus('Error setting up connection');
-      return false;
     }
   };
 
@@ -311,7 +276,13 @@ function App() {
     if (!peerConnectionRef.current) return;
 
     try {
-      await peerConnectionRef.current.setRemoteDescription(offer);
+      await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(offer));
+      
+      for (const candidate of pendingCandidatesRef.current) {
+        await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+      }
+      pendingCandidatesRef.current = [];
+      
       const answer = await peerConnectionRef.current.createAnswer();
       await peerConnectionRef.current.setLocalDescription(answer);
       console.log('Sending answer');
@@ -325,48 +296,56 @@ function App() {
     if (!peerConnectionRef.current) return;
 
     try {
-      await peerConnectionRef.current.setRemoteDescription(answer);
+      await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+      
+      for (const candidate of pendingCandidatesRef.current) {
+        await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+      }
+      pendingCandidatesRef.current = [];
     } catch (error) {
       console.error('Error handling answer:', error);
     }
   };
 
   const handleNewICECandidate = async (candidate) => {
-    if (!peerConnectionRef.current || !candidate) return;
+    if (!peerConnectionRef.current) return;
 
     try {
-      await peerConnectionRef.current.addIceCandidate(candidate);
+      if (peerConnectionRef.current.remoteDescription) {
+        await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+      } else {
+        pendingCandidatesRef.current.push(candidate);
+      }
     } catch (error) {
       console.error('Error adding ICE candidate:', error);
     }
   };
 
-  const handleNextUser = () => {
-    sendSignal('next-user', {}).catch(console.error);
-    setStatus('Looking for next user...');
+  const resetConnection = () => {
     setPartnerId('');
     if (peerConnectionRef.current) {
       peerConnectionRef.current.close();
       peerConnectionRef.current = null;
     }
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = null;
+    }
+    pendingCandidatesRef.current = [];
+  };
+
+  const handleNextUser = () => {
+    sendSignal('next-user', {});
+    setStatus('Looking for next partner...');
+    resetConnection();
   };
 
   const toggleMedia = (type, enable) => {
     if (!localStreamRef.current) return;
-
-    const tracks = localStreamRef.current.getTracks();
-    tracks.forEach(track => {
+    localStreamRef.current.getTracks().forEach(track => {
       if (track.kind === type) {
         track.enabled = enable;
       }
     });
-  };
-
-  const reconnect = () => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-    }
-    initializeUser();
   };
 
   return (
@@ -377,80 +356,34 @@ function App() {
           <div className={`connection-status ${isConnected ? 'connected' : 'disconnected'}`}>
             {isConnected ? '● Connected' : '● Disconnected'}
           </div>
-          <div className="user-id">Your ID: {userId || 'Connecting...'}</div>
-          <button onClick={reconnect} className="reconnect-btn">
-            🔄 Reconnect
-          </button>
+          <div className="user-id">ID: {userId.substring(0, 8) || '...'}</div>
         </div>
       </div>
 
       <div className="main-content">
         <div className="video-container">
           <div className="video-wrapper">
-            <h3>Your Video</h3>
-            <video
-              ref={localVideoRef}
-              autoPlay
-              muted
-              playsInline
-              className="video-element"
-            />
+            <h3>You</h3>
+            <video ref={localVideoRef} autoPlay muted playsInline className="video-element" />
             <div className="video-controls">
-              <button 
-                onClick={() => toggleMedia('video', false)}
-                className="control-btn"
-              >
-                📷 Mute Video
-              </button>
-              <button 
-                onClick={() => toggleMedia('video', true)}
-                className="control-btn"
-              >
-                📷 Unmute Video
-              </button>
-              <button 
-                onClick={() => toggleMedia('audio', false)}
-                className="control-btn"
-              >
-                🎤 Mute Audio
-              </button>
-              <button 
-                onClick={() => toggleMedia('audio', true)}
-                className="control-btn"
-              >
-                🎤 Unmute Audio
-              </button>
+              <button onClick={() => toggleMedia('video', false)} className="control-btn">📷 Off</button>
+              <button onClick={() => toggleMedia('video', true)} className="control-btn">📷 On</button>
+              <button onClick={() => toggleMedia('audio', false)} className="control-btn">🎤 Off</button>
+              <button onClick={() => toggleMedia('audio', true)} className="control-btn">🎤 On</button>
             </div>
           </div>
 
           <div className="video-wrapper">
-            <h3>Partner's Video {partnerId && `- ${partnerId.substring(0, 8)}`}</h3>
-            <video
-              ref={remoteVideoRef}
-              autoPlay
-              playsInline
-              className="video-element"
-            />
+            <h3>Partner {partnerId && `(${partnerId.substring(0, 8)})`}</h3>
+            <video ref={remoteVideoRef} autoPlay playsInline className="video-element" />
             {partnerId && (
-              <div className="partner-controls">
-                <button onClick={handleNextUser} className="next-btn">
-                  🔄 Next User
-                </button>
-              </div>
+              <button onClick={handleNextUser} className="next-btn">🔄 Next</button>
             )}
           </div>
         </div>
 
         <div className="status-panel">
           <div className="status-message">{status}</div>
-          {!partnerId && isConnected && (
-            <button 
-              onClick={initializeMedia} 
-              className="media-btn"
-            >
-              🎥 Start Camera & Microphone
-            </button>
-          )}
         </div>
       </div>
     </div>
