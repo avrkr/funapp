@@ -52,11 +52,9 @@ function App() {
       
       const newUserId = data.userId;
       setUserId(newUserId);
+      setStatus('User ID received. Connecting...');
       
-      // Join the chat system
-      await sendSignal('join', {}, newUserId);
-      
-      // Connect to events stream
+      // Connect to events stream first
       connectEventSource(newUserId);
       
     } catch (error) {
@@ -85,6 +83,9 @@ function App() {
         console.log('✅ EventSource connected successfully');
         setStatus('Connected! Waiting for a partner...');
         setIsConnected(true);
+        
+        // Join the chat system after connection is established
+        sendSignal('join', {}, userId);
         
         if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
@@ -132,6 +133,8 @@ function App() {
   };
 
   const handleServerEvent = (data) => {
+    console.log('Received server event:', data.type);
+    
     switch (data.type) {
       case 'connected':
         console.log('Connected to server with ID:', data.data.userId);
@@ -171,13 +174,19 @@ function App() {
         }
         break;
         
+      case 'heartbeat':
+        // Keep connection alive
+        break;
+        
       default:
         console.log('Unknown event type:', data.type);
     }
   };
 
-  const sendSignal = async (type, data, targetUserId = userId) => {
+  const sendSignal = async (type, data = {}, targetUserId = userId) => {
     try {
+      console.log('Sending signal:', type, 'for user:', targetUserId);
+      
       const response = await fetch(`${SERVER_URL}/api/signal`, {
         method: 'POST',
         headers: {
@@ -185,14 +194,23 @@ function App() {
         },
         body: JSON.stringify({
           userId: targetUserId,
-          type,
-          data
+          type: type,
+          data: data
         })
       });
       
-      return await response.json();
+      if (!response.ok) {
+        const errorData = await response.json();
+        console.error('Server error:', errorData);
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const result = await response.json();
+      console.log('Signal sent successfully:', type);
+      return result;
     } catch (error) {
       console.error('Error sending signal:', error);
+      throw error;
     }
   };
 
@@ -214,7 +232,7 @@ function App() {
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
-      setStatus('Camera and microphone ready! Waiting for partner...');
+      setStatus('Camera and microphone ready!');
       return true;
     } catch (error) {
       console.error('Error accessing media devices:', error);
@@ -249,7 +267,8 @@ function App() {
       // Handle ICE candidates
       peerConnection.onicecandidate = (event) => {
         if (event.candidate) {
-          sendSignal('ice-candidate', { candidate: event.candidate });
+          console.log('Sending ICE candidate');
+          sendSignal('ice-candidate', { candidate: event.candidate }).catch(console.error);
         }
       };
 
@@ -281,6 +300,7 @@ function App() {
     try {
       const offer = await peerConnectionRef.current.createOffer();
       await peerConnectionRef.current.setLocalDescription(offer);
+      console.log('Sending offer');
       await sendSignal('offer', { offer });
     } catch (error) {
       console.error('Error creating offer:', error);
@@ -294,6 +314,7 @@ function App() {
       await peerConnectionRef.current.setRemoteDescription(offer);
       const answer = await peerConnectionRef.current.createAnswer();
       await peerConnectionRef.current.setLocalDescription(answer);
+      console.log('Sending answer');
       await sendSignal('answer', { answer });
     } catch (error) {
       console.error('Error handling offer:', error);
@@ -321,7 +342,7 @@ function App() {
   };
 
   const handleNextUser = () => {
-    sendSignal('next-user', {});
+    sendSignal('next-user', {}).catch(console.error);
     setStatus('Looking for next user...');
     setPartnerId('');
     if (peerConnectionRef.current) {

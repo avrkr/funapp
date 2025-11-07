@@ -64,11 +64,11 @@ app.get('/api/events', (req, res) => {
     'Access-Control-Allow-Credentials': 'true'
   });
 
+  // Send initial heartbeat to establish connection
+  res.write('data: ' + JSON.stringify({ type: 'connected', data: { userId } }) + '\n\n');
+
   // Store the connection
   userConnections.set(userId, res);
-
-  // Send initial connection confirmation
-  sendToUser(userId, { type: 'connected', data: { userId } });
 
   // Add user to system if not already there
   if (!users.has(userId)) {
@@ -77,9 +77,23 @@ app.get('/api/events', (req, res) => {
     pairUsers();
   }
 
+  // Send periodic heartbeats to keep connection alive
+  const heartbeat = setInterval(() => {
+    if (userConnections.has(userId)) {
+      try {
+        res.write('data: ' + JSON.stringify({ type: 'heartbeat' }) + '\n\n');
+      } catch (error) {
+        clearInterval(heartbeat);
+      }
+    } else {
+      clearInterval(heartbeat);
+    }
+  }, 30000);
+
   // Handle client disconnect
   req.on('close', () => {
     console.log('User disconnected:', userId);
+    clearInterval(heartbeat);
     userConnections.delete(userId);
     
     const user = users.get(userId);
@@ -109,86 +123,98 @@ app.get('/api/events', (req, res) => {
 
 // Signaling endpoint for WebRTC offers/answers/ice-candidates
 app.post('/api/signal', (req, res) => {
-  const { userId, type, data } = req.body;
-  
-  if (!userId || !type) {
-    return res.status(400).json({ error: 'User ID and type required' });
-  }
+  try {
+    const { userId, type, data } = req.body;
+    
+    console.log('Received signal:', { userId, type, data: data ? 'data present' : 'no data' });
+    
+    if (!userId || !type) {
+      return res.status(400).json({ error: 'User ID and type required' });
+    }
 
-  const user = users.get(userId);
-  
-  switch (type) {
-    case 'offer':
-      if (user && user.partner) {
-        sendToUser(user.partner, {
-          type: 'offer',
-          data: {
-            offer: data.offer,
-            from: userId
-          }
-        });
-      }
-      break;
-      
-    case 'answer':
-      if (user && user.partner) {
-        sendToUser(user.partner, {
-          type: 'answer',
-          data: {
-            answer: data.answer,
-            from: userId
-          }
-        });
-      }
-      break;
-      
-    case 'ice-candidate':
-      if (user && user.partner) {
-        sendToUser(user.partner, {
-          type: 'ice-candidate',
-          data: {
-            candidate: data.candidate,
-            from: userId
-          }
-        });
-      }
-      break;
-      
-    case 'next-user':
-      if (user && user.partner) {
-        // Notify current partner
-        sendToUser(user.partner, { type: 'partner-disconnected' });
-        
-        // Remove partnership
-        const partner = users.get(user.partner);
-        if (partner) {
-          partner.partner = null;
-          waitingUsers.push(user.partner);
+    const user = users.get(userId);
+    
+    switch (type) {
+      case 'offer':
+        if (user && user.partner) {
+          sendToUser(user.partner, {
+            type: 'offer',
+            data: {
+              offer: data?.offer,
+              from: userId
+            }
+          });
         }
+        break;
         
-        user.partner = null;
-        waitingUsers.push(userId);
-        pairUsers();
-      }
-      break;
-      
-    case 'join':
-      if (!users.has(userId)) {
-        users.set(userId, { partner: null });
-        waitingUsers.push(userId);
-        pairUsers();
-      }
-      break;
-  }
+      case 'answer':
+        if (user && user.partner) {
+          sendToUser(user.partner, {
+            type: 'answer',
+            data: {
+              answer: data?.answer,
+              from: userId
+            }
+          });
+        }
+        break;
+        
+      case 'ice-candidate':
+        if (user && user.partner && data?.candidate) {
+          sendToUser(user.partner, {
+            type: 'ice-candidate',
+            data: {
+              candidate: data.candidate,
+              from: userId
+            }
+          });
+        }
+        break;
+        
+      case 'next-user':
+        if (user && user.partner) {
+          // Notify current partner
+          sendToUser(user.partner, { type: 'partner-disconnected' });
+          
+          // Remove partnership
+          const partner = users.get(user.partner);
+          if (partner) {
+            partner.partner = null;
+            waitingUsers.push(user.partner);
+          }
+          
+          user.partner = null;
+          waitingUsers.push(userId);
+          pairUsers();
+        }
+        break;
+        
+      case 'join':
+        if (!users.has(userId)) {
+          users.set(userId, { partner: null });
+          waitingUsers.push(userId);
+          pairUsers();
+        }
+        break;
+        
+      default:
+        console.log('Unknown signal type:', type);
+    }
 
-  res.json({ status: 'ok' });
+    res.json({ status: 'ok', message: 'Signal processed' });
+  } catch (error) {
+    console.error('Error processing signal:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 function sendToUser(userId, message) {
   const connection = userConnections.get(userId);
   if (connection && !connection.finished) {
     try {
-      connection.write(`data: ${JSON.stringify(message)}\n\n`);
+      const messageStr = 'data: ' + JSON.stringify(message) + '\n\n';
+      connection.write(messageStr);
+      console.log('Sent to user', userId, ':', message.type);
     } catch (error) {
       console.error('Error sending to user:', userId, error);
       userConnections.delete(userId);
