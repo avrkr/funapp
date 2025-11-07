@@ -28,10 +28,12 @@ function App() {
   useEffect(() => {
     // Initialize socket connection
     const serverUrl = import.meta.env.VITE_SERVER_URL || 
-                 window.location.origin.replace('3000', '5000') || 
-                 'http://localhost:5000';
+                 (window.location.origin.includes('vercel.app') 
+                   ? window.location.origin 
+                   : 'http://localhost:5000');
     const newSocket = io(serverUrl, {
-  transports: ['websocket', 'polling']
+  transports: ['websocket', 'polling'],
+  path: '/socket.io/'
 });
     
     socketRef.current = newSocket;
