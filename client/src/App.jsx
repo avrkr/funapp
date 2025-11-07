@@ -31,6 +31,7 @@ function App() {
   const remoteVideoRef = useRef(null);
   const localStreamRef = useRef(null);
   const peerConnectionRef = useRef(null);
+  const remoteStreamRef = useRef(null);
   const eventSourceRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
   
@@ -47,9 +48,8 @@ function App() {
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }
-      if (peerConnectionRef.current) {
-        peerConnectionRef.current.close();
-      }
+      // Use cleanupPeerConnection to ensure remote stream and handlers are cleared
+      cleanupPeerConnection();
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => track.stop());
       }
@@ -307,13 +307,56 @@ function App() {
         peerConnection.addTrack(track, localStreamRef.current);
       });
 
-      // Handle incoming remote stream
-      peerConnection.ontrack = (event) => {
-        console.log('Received remote stream tracks:', event.streams[0].getTracks().length);
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = event.streams[0];
+      // Prepare a remote MediaStream to collect incoming tracks. This is
+      // more robust than relying on event.streams (which can be empty in
+      // some browser implementations). Attach it early so the <video>
+      // element is ready to play when tracks arrive.
+      if (!remoteStreamRef.current) {
+        remoteStreamRef.current = new MediaStream();
+      }
+
+      if (remoteVideoRef.current) {
+        try {
+          remoteVideoRef.current.srcObject = remoteStreamRef.current;
+        } catch (e) {
+          console.warn('Could not set remote video srcObject yet', e);
         }
-        setStatus('Video call connected! You should see each other now.');
+      }
+
+      // Handle incoming remote tracks and append them to the remote stream
+      peerConnection.ontrack = (event) => {
+        try {
+          // Some browsers include streams on the event; prefer tracks to be
+          // added to the shared remote MediaStream for consistency.
+          if (event.streams && event.streams.length > 0) {
+            event.streams.forEach((s) => {
+              s.getTracks().forEach((t) => {
+                console.log('Adding remote track from event.streams:', t.kind);
+                remoteStreamRef.current.addTrack(t);
+              });
+            });
+          } else if (event.track) {
+            console.log('Adding remote track from event.track:', event.track.kind);
+            remoteStreamRef.current.addTrack(event.track);
+          }
+
+          if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== remoteStreamRef.current) {
+            remoteVideoRef.current.srcObject = remoteStreamRef.current;
+          }
+
+          // Try to play the video element (may be blocked until user
+          // interaction depending on browser autoplay policies).
+          if (remoteVideoRef.current) {
+            const p = remoteVideoRef.current.play();
+            if (p && p.catch) p.catch(() => {
+              console.debug('Autoplay prevented; user interaction may be required to start remote audio/video');
+            });
+          }
+
+          setStatus('Video call connected! You should see each other now.');
+        } catch (err) {
+          console.error('Error processing ontrack event:', err);
+        }
       };
 
       // Handle ICE candidates - using ref to avoid stale closure
@@ -440,10 +483,52 @@ function App() {
   };
 
   const cleanupPeerConnection = () => {
-    if (peerConnectionRef.current) {
+    try {
       console.log('Cleaning up peer connection');
-      peerConnectionRef.current.close();
-      peerConnectionRef.current = null;
+
+      if (peerConnectionRef.current) {
+        // Remove event handlers to avoid stray callbacks
+        try {
+          peerConnectionRef.current.ontrack = null;
+          peerConnectionRef.current.onicecandidate = null;
+          peerConnectionRef.current.onconnectionstatechange = null;
+          peerConnectionRef.current.oniceconnectionstatechange = null;
+          peerConnectionRef.current.onnegotiationneeded = null;
+        } catch (e) {
+          // ignore
+        }
+
+        try {
+          peerConnectionRef.current.close();
+        } catch (e) {
+          console.warn('Error closing peer connection', e);
+        }
+
+        peerConnectionRef.current = null;
+      }
+
+      // Stop and clear remote stream
+      if (remoteStreamRef.current) {
+        try {
+          remoteStreamRef.current.getTracks().forEach(t => {
+            try { t.stop(); } catch (e) { /* ignore */ }
+          });
+        } catch (e) {
+          // ignore
+        }
+
+        remoteStreamRef.current = null;
+      }
+
+      if (remoteVideoRef.current) {
+        try {
+          remoteVideoRef.current.srcObject = null;
+        } catch (e) {
+          // ignore
+        }
+      }
+    } catch (error) {
+      console.error('Error during cleanupPeerConnection:', error);
     }
   };
 
