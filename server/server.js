@@ -6,20 +6,38 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
-// Configure CORS for Vercel
+// Configure CORS for Vercel deployment
+const allowedOrigins = [
+  'https://funappmain.vercel.app',
+  'https://funapp-4kak2cmbk-vtu13429personal-9291s-projects.vercel.app',
+  'http://localhost:3000',
+  'http://localhost:5173',
+  process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null,
+].filter(Boolean);
+
+console.log('Allowed origins:', allowedOrigins);
+
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow all origins in production for demo purposes
-    // For production, you might want to restrict this
-    callback(null, true);
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    } else {
+      console.log('Blocked origin:', origin);
+      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+      return callback(new Error(msg), false);
+    }
   },
   credentials: true
 }));
 
 const io = socketIo(server, {
   cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
+    origin: allowedOrigins,
+    methods: ["GET", "POST"],
+    credentials: true
   },
   transports: ['websocket', 'polling']
 });
@@ -28,7 +46,7 @@ const io = socketIo(server, {
 const users = new Map();
 const waitingUsers = [];
 
-// Health check endpoint
+// API health check
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
@@ -45,21 +63,29 @@ app.get('/', (req, res) => {
     endpoints: {
       health: '/api/health',
       websocket: '/socket.io/'
-    }
+    },
+    allowedOrigins: allowedOrigins
   });
 });
 
-// Socket.IO connection handling (same as before)
+// Socket.IO connection handling
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
   
+  // Add user to connected users
   users.set(socket.id, { socket, partner: null });
+  
+  // Send user their ID
   socket.emit('user-id', socket.id);
+  
+  // Try to pair users
   pairUsers();
   
+  // Handle WebRTC signaling
   socket.on('offer', (data) => {
     const user = users.get(socket.id);
     if (user && user.partner) {
+      console.log(`Offer from ${socket.id} to ${user.partner}`);
       io.to(user.partner).emit('offer', {
         offer: data.offer,
         from: socket.id
@@ -70,6 +96,7 @@ io.on('connection', (socket) => {
   socket.on('answer', (data) => {
     const user = users.get(socket.id);
     if (user && user.partner) {
+      console.log(`Answer from ${socket.id} to ${user.partner}`);
       io.to(user.partner).emit('answer', {
         answer: data.answer,
         from: socket.id
@@ -89,37 +116,47 @@ io.on('connection', (socket) => {
   
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
-    const user = users.get(socket.id);
     
+    const user = users.get(socket.id);
     if (user && user.partner) {
+      // Notify partner about disconnect
       io.to(user.partner).emit('partner-disconnected');
+      
+      // Remove partner reference
       const partner = users.get(user.partner);
       if (partner) {
         partner.partner = null;
+        // Add partner back to waiting list if they're still connected
         if (users.has(user.partner)) {
           waitingUsers.push(user.partner);
         }
       }
     }
     
+    // Remove user from all collections
     users.delete(socket.id);
     const waitingIndex = waitingUsers.indexOf(socket.id);
     if (waitingIndex > -1) {
       waitingUsers.splice(waitingIndex, 1);
     }
     
+    // Try to pair remaining users
     pairUsers();
   });
   
   socket.on('next-user', () => {
     const user = users.get(socket.id);
     if (user && user.partner) {
+      // Notify current partner
       io.to(user.partner).emit('partner-disconnected');
+      
+      // Remove partnership
       const partner = users.get(user.partner);
       if (partner) {
         partner.partner = null;
         waitingUsers.push(user.partner);
       }
+      
       user.partner = null;
       waitingUsers.push(socket.id);
       pairUsers();
@@ -141,9 +178,12 @@ function pairUsers() {
       
       io.to(user1).emit('user-connected', { partnerId: user2 });
       io.to(user2).emit('user-connected', { partnerId: user1 });
+      
+      console.log(`Paired users: ${user1} with ${user2}`);
     }
   }
   
+  // Add single user to waiting if not already there
   users.forEach((userData, userId) => {
     if (!userData.partner && !waitingUsers.includes(userId)) {
       waitingUsers.push(userId);
@@ -160,5 +200,6 @@ module.exports = app;
 if (!process.env.VERCEL) {
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    console.log('Allowed origins:', allowedOrigins);
   });
 }

@@ -26,27 +26,35 @@ function App() {
   const socketRef = useRef(null);
 
   useEffect(() => {
-    // Initialize socket connection
+    // Use environment variable or fallback to your server URL
     const serverUrl = import.meta.env.VITE_SERVER_URL || 
-                 (window.location.origin.includes('vercel.app') 
-                   ? window.location.origin 
-                   : 'http://localhost:5000');
+                     'https://funapp-4kak2cmbk-vtu13429personal-9291s-projects.vercel.app';
+    
+    console.log('Connecting to server:', serverUrl);
+    
     const newSocket = io(serverUrl, {
-  transports: ['websocket', 'polling'],
-  path: '/socket.io/'
-});
+      transports: ['websocket', 'polling'],
+      path: '/socket.io/'
+    });
     
     socketRef.current = newSocket;
     setSocket(newSocket);
 
     newSocket.on('connect', () => {
-      console.log('Connected to server');
+      console.log('Connected to server successfully');
       setStatus('Waiting for a partner...');
       setIsConnected(true);
     });
 
+    newSocket.on('connect_error', (error) => {
+      console.error('Connection error:', error);
+      setStatus('Connection failed. Retrying...');
+      setIsConnected(false);
+    });
+
     newSocket.on('user-id', (id) => {
       setUserId(id);
+      console.log('User ID received:', id);
     });
 
     newSocket.on('user-connected', async (data) => {
@@ -100,9 +108,10 @@ function App() {
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
+      setStatus('Camera and microphone ready! Waiting for partner...');
     } catch (error) {
       console.error('Error accessing media devices:', error);
-      setStatus('Error accessing camera/microphone');
+      setStatus('Error accessing camera/microphone. Please check permissions.');
     }
   };
 
@@ -121,6 +130,7 @@ function App() {
 
       // Handle incoming remote stream
       peerConnection.ontrack = (event) => {
+        console.log('Received remote stream');
         if (remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = event.streams[0];
         }
@@ -138,13 +148,16 @@ function App() {
       peerConnection.onconnectionstatechange = () => {
         console.log('Connection state:', peerConnection.connectionState);
         if (peerConnection.connectionState === 'connected') {
-          setStatus('Connected!');
+          setStatus('Connected! Video chat is active.');
+        } else if (peerConnection.connectionState === 'disconnected') {
+          setStatus('Connection lost. Reconnecting...');
         }
       };
 
       peerConnectionRef.current = peerConnection;
     } catch (error) {
       console.error('Error creating peer connection:', error);
+      setStatus('Error setting up connection');
     }
   };
 

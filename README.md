@@ -2,27 +2,22 @@
 
 A real-time video chat application that automatically connects users with random partners using WebRTC and Socket.IO.
 
-## Features
+## Deployment URLs
+- **Client**: https://funappmain.vercel.app
+- **Server**: https://funapp-4kak2cmbk-vtu13429personal-9291s-projects.vercel.app
 
+## Features
 - 🎥 Real-time video and audio communication
 - 🔄 Automatic random user pairing
 - 🔒 WebRTC with Google STUN servers
 - 📱 Responsive design
 - 🎛️ Media controls (mute/unmute audio/video)
 - 🔄 Next user button to skip current partner
-- 🌐 Cross-origin support
 
-## Tech Stack
+## Local Development
 
-- **Frontend**: React, Vite, Socket.IO Client
-- **Backend**: Node.js, Express, Socket.IO
-- **WebRTC**: Peer-to-peer video/audio streaming
-- **STUN**: Google STUN servers
-
-## Setup Instructions
-
-### Backend Setup
-
-1. Navigate to backend directory:
+### Server
 ```bash
-cd backend
+cd server
+npm install
+npm run dev
