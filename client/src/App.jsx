@@ -200,8 +200,16 @@ function App() {
   };
 
   const sendSignal = async (type, data = {}, targetUserId = userId) => {
+    // FIX: Ensure we always have a valid userId
+    const currentUserId = targetUserId || userId;
+    
+    if (!currentUserId) {
+      console.error('No user ID available for sending signal');
+      return;
+    }
+
     try {
-      console.log('Sending signal:', type, 'for user:', targetUserId);
+      console.log('Sending signal:', type, 'for user:', currentUserId);
       
       const response = await fetch(`${SERVER_URL}/api/signal`, {
         method: 'POST',
@@ -209,7 +217,7 @@ function App() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          userId: targetUserId,
+          userId: currentUserId,
           type: type,
           data: data
         })
@@ -300,7 +308,8 @@ function App() {
       peerConnection.onicecandidate = (event) => {
         if (event.candidate) {
           console.log('Generated ICE candidate:', event.candidate.type);
-          sendSignal('ice-candidate', { candidate: event.candidate }).catch(console.error);
+          // FIX: Pass userId explicitly to ensure it's available
+          sendSignal('ice-candidate', { candidate: event.candidate }, userId).catch(console.error);
         } else {
           console.log('All ICE candidates generated');
         }
@@ -359,7 +368,8 @@ function App() {
       await peerConnectionRef.current.setLocalDescription(offer);
       
       console.log('Sending offer to signaling server');
-      await sendSignal('offer', { offer: peerConnectionRef.current.localDescription });
+      // FIX: Pass userId explicitly to ensure it's available
+      await sendSignal('offer', { offer: peerConnectionRef.current.localDescription }, userId);
     } catch (error) {
       console.error('Error creating offer:', error);
     }
@@ -385,7 +395,8 @@ function App() {
       await peerConnectionRef.current.setLocalDescription(answer);
       
       console.log('Sending answer to signaling server');
-      await sendSignal('answer', { answer: peerConnectionRef.current.localDescription });
+      // FIX: Pass userId explicitly to ensure it's available
+      await sendSignal('answer', { answer: peerConnectionRef.current.localDescription }, userId);
     } catch (error) {
       console.error('Error handling offer:', error);
     }
@@ -428,7 +439,8 @@ function App() {
   };
 
   const handleNextUser = () => {
-    sendSignal('next-user', {}).catch(console.error);
+    // FIX: Pass userId explicitly to ensure it's available
+    sendSignal('next-user', {}, userId).catch(console.error);
     setStatus('Looking for next user...');
     setPartnerId('');
     cleanupPeerConnection();
