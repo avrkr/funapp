@@ -33,6 +33,9 @@ function App() {
   const peerConnectionRef = useRef(null);
   const eventSourceRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
+  
+  // Use ref for userId to avoid stale closures in WebRTC callbacks
+  const userIdRef = useRef('');
 
   useEffect(() => {
     initializeUser();
@@ -53,6 +56,11 @@ function App() {
     };
   }, []);
 
+  // Update the ref whenever userId changes
+  useEffect(() => {
+    userIdRef.current = userId;
+  }, [userId]);
+
   const initializeUser = async () => {
     try {
       setStatus('Getting user ID...');
@@ -63,6 +71,7 @@ function App() {
       
       const newUserId = data.userId;
       setUserId(newUserId);
+      userIdRef.current = newUserId; // Also set the ref immediately
       setStatus('User ID received. Connecting...');
       
       // Connect to events stream first
@@ -96,7 +105,7 @@ function App() {
         setIsConnected(true);
         
         // Join the chat system after connection is established
-        sendSignal('join', {}, userId);
+        sendSignal('join', {});
         
         if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
@@ -123,8 +132,8 @@ function App() {
         if (!reconnectTimeoutRef.current) {
           reconnectTimeoutRef.current = setTimeout(() => {
             reconnectTimeoutRef.current = null;
-            if (userId) {
-              connectEventSource(userId);
+            if (userIdRef.current) {
+              connectEventSource(userIdRef.current);
             }
           }, 3000);
         }
@@ -136,8 +145,8 @@ function App() {
       
       reconnectTimeoutRef.current = setTimeout(() => {
         reconnectTimeoutRef.current = null;
-        if (userId) {
-          connectEventSource(userId);
+        if (userIdRef.current) {
+          connectEventSource(userIdRef.current);
         }
       }, 3000);
     }
@@ -155,8 +164,7 @@ function App() {
         console.log('Partner connected:', data.data.partnerId);
         setPartnerId(data.data.partnerId);
         setStatus('Partner connected! Setting up video call...');
-        // Pass the current userId explicitly to ensure it's used for PC creation
-        createPeerConnection(userId).then((success) => {
+        createPeerConnection().then((success) => {
           if (success) {
             createOffer();
           }
@@ -167,8 +175,7 @@ function App() {
         console.log('Received offer from:', data.data.from);
         setPartnerId(data.data.from);
         setStatus('Incoming call! Setting up video...');
-        // Pass the current userId explicitly to ensure it's used for PC creation
-        createPeerConnection(userId).then((success) => {
+        createPeerConnection().then((success) => {
           if (success) {
             handleOffer(data.data.offer);
           }
@@ -201,12 +208,10 @@ function App() {
     }
   };
 
-  const sendSignal = async (type, data = {}, targetUserId = userId) => {
-    // FIX: Ensure we always have a valid userId
-    const currentUserId = targetUserId || userId;
+  const sendSignal = async (type, data = {}) => {
+    const currentUserId = userIdRef.current;
     
     if (!currentUserId) {
-      // This is the error line
       console.error('No user ID available for sending signal');
       return;
     }
@@ -278,21 +283,13 @@ function App() {
     }
   };
 
-  // FIX: Accept the currentUserId as an argument to capture its value
-  const createPeerConnection = async (currentUserId) => { 
+  const createPeerConnection = async () => {
     // Clean up existing connection
     cleanupPeerConnection();
 
     if (!localStreamRef.current) {
       const mediaSuccess = await initializeMedia();
       if (!mediaSuccess) return false;
-    }
-    
-    // Safety check to ensure the ID is available for the closure
-    const pcUserId = currentUserId || userId;
-    if (!pcUserId) {
-        console.error("User ID not available to set up Peer Connection.");
-        return false;
     }
 
     try {
@@ -315,12 +312,11 @@ function App() {
         setStatus('Video call connected! You should see each other now.');
       };
 
-      // Handle ICE candidates
+      // Handle ICE candidates - using ref to avoid stale closure
       peerConnection.onicecandidate = (event) => {
         if (event.candidate) {
           console.log('Generated ICE candidate:', event.candidate.type);
-          // FIX APPLIED HERE: Use the captured 'pcUserId' for the synchronous callback.
-          sendSignal('ice-candidate', { candidate: event.candidate }, pcUserId).catch(console.error);
+          sendSignal('ice-candidate', { candidate: event.candidate }).catch(console.error);
         } else {
           console.log('All ICE candidates generated');
         }
@@ -363,8 +359,8 @@ function App() {
   };
 
   const createOffer = async () => {
-    if (!peerConnectionRef.current || !userId) {
-      console.error('No peer connection or user ID available for offer');
+    if (!peerConnectionRef.current) {
+      console.error('No peer connection available for offer');
       return;
     }
 
@@ -379,16 +375,15 @@ function App() {
       await peerConnectionRef.current.setLocalDescription(offer);
       
       console.log('Sending offer to signaling server');
-      // The state 'userId' should be stable here, but we pass it explicitly.
-      await sendSignal('offer', { offer: peerConnectionRef.current.localDescription }, userId);
+      await sendSignal('offer', { offer: peerConnectionRef.current.localDescription });
     } catch (error) {
       console.error('Error creating offer:', error);
     }
   };
 
   const handleOffer = async (offer) => {
-    if (!peerConnectionRef.current || !userId) {
-      console.error('No peer connection or user ID available for handling offer');
+    if (!peerConnectionRef.current) {
+      console.error('No peer connection available for handling offer');
       return;
     }
 
@@ -406,8 +401,7 @@ function App() {
       await peerConnectionRef.current.setLocalDescription(answer);
       
       console.log('Sending answer to signaling server');
-      // The state 'userId' should be stable here, but we pass it explicitly.
-      await sendSignal('answer', { answer: peerConnectionRef.current.localDescription }, userId);
+      await sendSignal('answer', { answer: peerConnectionRef.current.localDescription });
     } catch (error) {
       console.error('Error handling offer:', error);
     }
@@ -450,8 +444,7 @@ function App() {
   };
 
   const handleNextUser = () => {
-    // FIX: Pass userId explicitly to ensure it's available
-    sendSignal('next-user', {}, userId).catch(console.error);
+    sendSignal('next-user', {}).catch(console.error);
     setStatus('Looking for next user...');
     setPartnerId('');
     cleanupPeerConnection();
