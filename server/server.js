@@ -25,22 +25,19 @@ const userConnections = new Map();
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
-    message: 'WebRTC Server is running',
     users: users.size,
-    waiting: waitingUsers.length,
-    timestamp: new Date().toISOString()
+    waiting: waitingUsers.length
   });
 });
 
 app.get('/', (req, res) => {
   res.json({ 
-    message: 'WebRTC Chat Server is running',
+    message: 'WebRTC Chat Server',
     endpoints: {
       health: '/api/health',
       events: '/api/events',
-      signaling: '/api/signal'
-    },
-    allowedOrigins: allowedOrigins
+      signal: '/api/signal'
+    }
   });
 });
 
@@ -54,20 +51,25 @@ app.get('/api/events', (req, res) => {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Credentials': 'true'
+    'Connection': 'keep-alive'
   });
 
-  res.write('data: ' + JSON.stringify({ type: 'connected', data: { userId } }) + '\n\n');
+  res.write(`data: ${JSON.stringify({ type: 'connected', userId })}\n\n`);
 
   userConnections.set(userId, res);
+
+  if (!users.has(userId)) {
+    users.set(userId, { partner: null, ready: false });
+    waitingUsers.push(userId);
+    console.log(`User ${userId.substring(0, 8)} joined, waiting: ${waitingUsers.length}`);
+    pairUsers();
+  }
 
   const heartbeat = setInterval(() => {
     if (userConnections.has(userId)) {
       try {
-        res.write('data: ' + JSON.stringify({ type: 'heartbeat' }) + '\n\n');
-      } catch (error) {
+        res.write(`data: ${JSON.stringify({ type: 'heartbeat' })}\n\n`);
+      } catch (e) {
         clearInterval(heartbeat);
       }
     } else {
@@ -76,7 +78,7 @@ app.get('/api/events', (req, res) => {
   }, 30000);
 
   req.on('close', () => {
-    console.log('User disconnected:', userId);
+    console.log(`User ${userId.substring(0, 8)} disconnected`);
     clearInterval(heartbeat);
     userConnections.delete(userId);
     
@@ -87,7 +89,8 @@ app.get('/api/events', (req, res) => {
       const partner = users.get(user.partner);
       if (partner) {
         partner.partner = null;
-        if (users.has(user.partner)) {
+        partner.ready = false;
+        if (!waitingUsers.includes(user.partner)) {
           waitingUsers.push(user.partner);
           pairUsers();
         }
@@ -95,131 +98,94 @@ app.get('/api/events', (req, res) => {
     }
     
     users.delete(userId);
-    const waitingIndex = waitingUsers.indexOf(userId);
-    if (waitingIndex > -1) {
-      waitingUsers.splice(waitingIndex, 1);
+    const idx = waitingUsers.indexOf(userId);
+    if (idx > -1) {
+      waitingUsers.splice(idx, 1);
     }
   });
 });
 
 app.post('/api/signal', (req, res) => {
-  try {
-    const { userId, type, data } = req.body;
-    
-    console.log('Received signal:', { userId, type });
-    
-    if (!userId || !type) {
-      return res.status(400).json({ error: 'User ID and type required' });
-    }
-
-    const user = users.get(userId);
-    
-    switch (type) {
-      case 'join':
-        if (!users.has(userId)) {
-          users.set(userId, { partner: null, ready: false });
-          waitingUsers.push(userId);
-          console.log('User joined:', userId);
-          pairUsers();
-        }
-        break;
-
-      case 'ready':
-        if (user) {
-          user.ready = true;
-          console.log('User ready:', userId);
-          
-          if (user.partner) {
-            const partner = users.get(user.partner);
-            if (partner && partner.ready) {
-              sendToUser(userId, { 
-                type: 'start-call', 
-                data: { partnerId: user.partner, initiator: true } 
-              });
-              sendToUser(user.partner, { 
-                type: 'start-call', 
-                data: { partnerId: userId, initiator: false } 
-              });
-            }
-          }
-        }
-        break;
-        
-      case 'offer':
-        if (user && user.partner) {
-          console.log('Relaying offer from', userId, 'to', user.partner);
-          sendToUser(user.partner, {
-            type: 'offer',
-            data: {
-              offer: data?.offer,
-              from: userId
-            }
-          });
-        }
-        break;
-        
-      case 'answer':
-        if (user && user.partner) {
-          console.log('Relaying answer from', userId, 'to', user.partner);
-          sendToUser(user.partner, {
-            type: 'answer',
-            data: {
-              answer: data?.answer,
-              from: userId
-            }
-          });
-        }
-        break;
-        
-      case 'ice-candidate':
-        if (user && user.partner && data?.candidate) {
-          sendToUser(user.partner, {
-            type: 'ice-candidate',
-            data: {
-              candidate: data.candidate,
-              from: userId
-            }
-          });
-        }
-        break;
-        
-      case 'next-user':
-        if (user && user.partner) {
-          sendToUser(user.partner, { type: 'partner-disconnected' });
-          
-          const partner = users.get(user.partner);
-          if (partner) {
-            partner.partner = null;
-            partner.ready = false;
-            waitingUsers.push(user.partner);
-          }
-          
-          user.partner = null;
-          user.ready = false;
-          waitingUsers.push(userId);
-          pairUsers();
-        }
-        break;
-        
-      default:
-        console.log('Unknown signal type:', type);
-    }
-
-    res.json({ status: 'ok' });
-  } catch (error) {
-    console.error('Error processing signal:', error);
-    res.status(500).json({ error: 'Internal server error' });
+  const { userId, type, data } = req.body;
+  
+  if (!userId || !type) {
+    console.error('Missing userId or type:', { userId, type });
+    return res.status(400).json({ error: 'userId and type required' });
   }
+
+  console.log(`Signal: ${type} from ${userId.substring(0, 8)}`);
+
+  const user = users.get(userId);
+  
+  if (!user) {
+    console.error('User not found:', userId.substring(0, 8));
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  switch (type) {
+    case 'ready':
+      user.ready = true;
+      console.log(`User ${userId.substring(0, 8)} ready`);
+      
+      if (user.partner) {
+        const partner = users.get(user.partner);
+        if (partner && partner.ready) {
+          console.log(`Both users ready, starting call`);
+          sendToUser(userId, { type: 'start-call', initiator: true });
+          sendToUser(user.partner, { type: 'start-call', initiator: false });
+        }
+      }
+      break;
+
+    case 'offer':
+      if (user.partner) {
+        console.log(`Relaying offer: ${userId.substring(0, 8)} → ${user.partner.substring(0, 8)}`);
+        sendToUser(user.partner, { type: 'offer', offer: data.offer, from: userId });
+      }
+      break;
+
+    case 'answer':
+      if (user.partner) {
+        console.log(`Relaying answer: ${userId.substring(0, 8)} → ${user.partner.substring(0, 8)}`);
+        sendToUser(user.partner, { type: 'answer', answer: data.answer, from: userId });
+      }
+      break;
+
+    case 'ice-candidate':
+      if (user.partner && data.candidate) {
+        sendToUser(user.partner, { type: 'ice-candidate', candidate: data.candidate, from: userId });
+      }
+      break;
+
+    case 'next':
+      if (user.partner) {
+        sendToUser(user.partner, { type: 'partner-disconnected' });
+        
+        const partner = users.get(user.partner);
+        if (partner) {
+          partner.partner = null;
+          partner.ready = false;
+          waitingUsers.push(user.partner);
+        }
+        
+        user.partner = null;
+        user.ready = false;
+        waitingUsers.push(userId);
+        pairUsers();
+      }
+      break;
+  }
+
+  res.json({ success: true });
 });
 
 function sendToUser(userId, message) {
-  const connection = userConnections.get(userId);
-  if (connection && !connection.finished) {
+  const conn = userConnections.get(userId);
+  if (conn && !conn.finished) {
     try {
-      connection.write('data: ' + JSON.stringify(message) + '\n\n');
-      console.log('Sent to', userId, ':', message.type);
-    } catch (error) {
-      console.error('Error sending to user:', userId, error);
+      conn.write(`data: ${JSON.stringify(message)}\n\n`);
+    } catch (e) {
+      console.error('Send error:', e);
       userConnections.delete(userId);
     }
   }
@@ -227,34 +193,28 @@ function sendToUser(userId, message) {
 
 function pairUsers() {
   while (waitingUsers.length >= 2) {
-    const user1 = waitingUsers.shift();
-    const user2 = waitingUsers.shift();
+    const id1 = waitingUsers.shift();
+    const id2 = waitingUsers.shift();
     
-    const user1Data = users.get(user1);
-    const user2Data = users.get(user2);
+    const user1 = users.get(id1);
+    const user2 = users.get(id2);
     
-    if (user1Data && user2Data) {
-      user1Data.partner = user2;
-      user2Data.partner = user1;
+    if (user1 && user2) {
+      user1.partner = id2;
+      user2.partner = id1;
+      user1.ready = false;
+      user2.ready = false;
       
-      sendToUser(user1, { 
-        type: 'user-connected', 
-        data: { partnerId: user2 } 
-      });
+      sendToUser(id1, { type: 'partner-found', partnerId: id2 });
+      sendToUser(id2, { type: 'partner-found', partnerId: id1 });
       
-      sendToUser(user2, { 
-        type: 'user-connected', 
-        data: { partnerId: user1 } 
-      });
-      
-      console.log(`Paired: ${user1} <-> ${user2}`);
+      console.log(`Paired: ${id1.substring(0, 8)} ↔ ${id2.substring(0, 8)}`);
     }
   }
 }
 
 app.get('/api/user-id', (req, res) => {
-  const userId = uuidv4();
-  res.json({ userId });
+  res.json({ userId: uuidv4() });
 });
 
 const PORT = process.env.PORT || 5000;
@@ -263,6 +223,6 @@ module.exports = app;
 
 if (!process.env.VERCEL) {
   app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`Server on port ${PORT}`);
   });
 }
