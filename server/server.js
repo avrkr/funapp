@@ -2,19 +2,36 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
+const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
 
-// Configure CORS to allow all origins
+// Configure CORS for Vercel deployment
+const allowedOrigins = [
+  'https://your-vercel-app.vercel.app',
+  'http://localhost:3000',
+  process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null,
+  process.env.FRONTEND_URL
+].filter(Boolean);
+
 app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST"]
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) === -1) {
+      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+      return callback(new Error(msg), false);
+    }
+    return callback(null, true);
+  },
+  credentials: true
 }));
 
 const io = socketIo(server, {
   cors: {
-    origin: "*",
+    origin: allowedOrigins,
     methods: ["GET", "POST"]
   }
 });
@@ -23,10 +40,26 @@ const io = socketIo(server, {
 const users = new Map();
 const waitingUsers = [];
 
-app.get('/', (req, res) => {
-  res.json({ message: 'WebRTC Chat Server is running' });
+// API health check
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'OK', 
+    message: 'WebRTC Server is running',
+    timestamp: new Date().toISOString()
+  });
 });
 
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'WebRTC Chat Server is running',
+    endpoints: {
+      health: '/api/health',
+      websocket: '/socket.io/'
+    }
+  });
+});
+
+// Socket.IO connection handling (same as before)
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
   
@@ -148,7 +181,9 @@ function pairUsers() {
 }
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log('Allowed hosts: All origins (*)');
+  console.log('Allowed origins:', allowedOrigins);
 });
+
+module.exports = app;

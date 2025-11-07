@@ -27,10 +27,12 @@ function App() {
 
   useEffect(() => {
     // Initialize socket connection
-    const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:5000';
+    const serverUrl = import.meta.env.VITE_SERVER_URL || 
+                 window.location.origin.replace('3000', '5000') || 
+                 'http://localhost:5000';
     const newSocket = io(serverUrl, {
-      transports: ['websocket', 'polling']
-    });
+  transports: ['websocket', 'polling']
+});
     
     socketRef.current = newSocket;
     setSocket(newSocket);
