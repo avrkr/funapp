@@ -11,6 +11,8 @@ const ICE_SERVERS = {
   ]
 };
 
+const SERVER_URL = 'https://funappbackend.vercel.app';
+
 function App() {
   const [userId, setUserId] = useState('');
   const [partnerId, setPartnerId] = useState('');
@@ -21,15 +23,15 @@ function App() {
   const remoteVideoRef = useRef(null);
   const localStreamRef = useRef(null);
   const peerConnectionRef = useRef(null);
-  const websocketRef = useRef(null);
+  const eventSourceRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
 
   useEffect(() => {
-    connectWebSocket();
+    initializeUser();
     
     return () => {
-      if (websocketRef.current) {
-        websocketRef.current.close();
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
       }
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
@@ -40,75 +42,99 @@ function App() {
     };
   }, []);
 
-  const connectWebSocket = () => {
-    const serverUrl = 'wss://funappbackend.vercel.app/ws';
-    
-    console.log('Connecting to WebSocket:', serverUrl);
-    setStatus('Connecting to server...');
-
+  const initializeUser = async () => {
     try {
-      const ws = new WebSocket(serverUrl);
-      websocketRef.current = ws;
+      setStatus('Getting user ID...');
+      
+      // Get a user ID from server
+      const response = await fetch(`${SERVER_URL}/api/user-id`);
+      const data = await response.json();
+      
+      const newUserId = data.userId;
+      setUserId(newUserId);
+      
+      // Join the chat system
+      await sendSignal('join', {}, newUserId);
+      
+      // Connect to events stream
+      connectEventSource(newUserId);
+      
+    } catch (error) {
+      console.error('Error initializing user:', error);
+      setStatus('Failed to initialize. Retrying...');
+      
+      reconnectTimeoutRef.current = setTimeout(() => {
+        reconnectTimeoutRef.current = null;
+        initializeUser();
+      }, 3000);
+    }
+  };
 
-      ws.onopen = () => {
-        console.log('✅ WebSocket connected successfully');
+  const connectEventSource = (userId) => {
+    try {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+
+      setStatus('Connecting to server...');
+      
+      const eventSource = new EventSource(`${SERVER_URL}/api/events?userId=${userId}`);
+      eventSourceRef.current = eventSource;
+
+      eventSource.onopen = () => {
+        console.log('✅ EventSource connected successfully');
         setStatus('Connected! Waiting for a partner...');
         setIsConnected(true);
         
-        // Clear any reconnect timeout
         if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
           reconnectTimeoutRef.current = null;
         }
       };
 
-      ws.onmessage = (event) => {
+      eventSource.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          handleWebSocketMessage(data);
+          handleServerEvent(data);
         } catch (error) {
-          console.error('Error parsing WebSocket message:', error);
+          console.error('Error parsing server event:', error);
         }
       };
 
-      ws.onclose = (event) => {
-        console.log('WebSocket closed:', event.code, event.reason);
-        setStatus('Disconnected from server. Reconnecting...');
+      eventSource.onerror = (error) => {
+        console.error('EventSource error:', error);
+        setStatus('Connection error. Reconnecting...');
         setIsConnected(false);
         
-        // Attempt to reconnect after 3 seconds
+        eventSource.close();
+        
         if (!reconnectTimeoutRef.current) {
           reconnectTimeoutRef.current = setTimeout(() => {
-            console.log('Attempting to reconnect...');
             reconnectTimeoutRef.current = null;
-            connectWebSocket();
+            if (userId) {
+              connectEventSource(userId);
+            }
           }, 3000);
         }
       };
 
-      ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        setStatus('Connection error. Retrying...');
-        setIsConnected(false);
-      };
-
     } catch (error) {
-      console.error('Error creating WebSocket:', error);
+      console.error('Error creating EventSource:', error);
       setStatus('Failed to connect. Retrying...');
       
-      // Retry after 3 seconds
       reconnectTimeoutRef.current = setTimeout(() => {
         reconnectTimeoutRef.current = null;
-        connectWebSocket();
+        if (userId) {
+          connectEventSource(userId);
+        }
       }, 3000);
     }
   };
 
-  const handleWebSocketMessage = (data) => {
+  const handleServerEvent = (data) => {
     switch (data.type) {
-      case 'user-id':
-        setUserId(data.data);
-        console.log('User ID received:', data.data);
+      case 'connected':
+        console.log('Connected to server with ID:', data.data.userId);
         break;
         
       case 'user-connected':
@@ -146,13 +172,27 @@ function App() {
         break;
         
       default:
-        console.log('Unknown message type:', data.type);
+        console.log('Unknown event type:', data.type);
     }
   };
 
-  const sendWebSocketMessage = (message) => {
-    if (websocketRef.current && websocketRef.current.readyState === WebSocket.OPEN) {
-      websocketRef.current.send(JSON.stringify(message));
+  const sendSignal = async (type, data, targetUserId = userId) => {
+    try {
+      const response = await fetch(`${SERVER_URL}/api/signal`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          userId: targetUserId,
+          type,
+          data
+        })
+      });
+      
+      return await response.json();
+    } catch (error) {
+      console.error('Error sending signal:', error);
     }
   };
 
@@ -209,10 +249,7 @@ function App() {
       // Handle ICE candidates
       peerConnection.onicecandidate = (event) => {
         if (event.candidate) {
-          sendWebSocketMessage({
-            type: 'ice-candidate',
-            candidate: event.candidate
-          });
+          sendSignal('ice-candidate', { candidate: event.candidate });
         }
       };
 
@@ -244,10 +281,7 @@ function App() {
     try {
       const offer = await peerConnectionRef.current.createOffer();
       await peerConnectionRef.current.setLocalDescription(offer);
-      sendWebSocketMessage({
-        type: 'offer',
-        offer: offer
-      });
+      await sendSignal('offer', { offer });
     } catch (error) {
       console.error('Error creating offer:', error);
     }
@@ -260,10 +294,7 @@ function App() {
       await peerConnectionRef.current.setRemoteDescription(offer);
       const answer = await peerConnectionRef.current.createAnswer();
       await peerConnectionRef.current.setLocalDescription(answer);
-      sendWebSocketMessage({
-        type: 'answer',
-        answer: answer
-      });
+      await sendSignal('answer', { answer });
     } catch (error) {
       console.error('Error handling offer:', error);
     }
@@ -290,7 +321,7 @@ function App() {
   };
 
   const handleNextUser = () => {
-    sendWebSocketMessage({ type: 'next-user' });
+    sendSignal('next-user', {});
     setStatus('Looking for next user...');
     setPartnerId('');
     if (peerConnectionRef.current) {
@@ -311,10 +342,10 @@ function App() {
   };
 
   const reconnect = () => {
-    if (websocketRef.current) {
-      websocketRef.current.close();
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
     }
-    connectWebSocket();
+    initializeUser();
   };
 
   return (

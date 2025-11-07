@@ -1,10 +1,8 @@
 const express = require('express');
-const http = require('http');
-const WebSocket = require('ws');
 const cors = require('cors');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-const server = http.createServer(app);
 
 // Configure CORS
 const allowedOrigins = [
@@ -21,15 +19,10 @@ app.use(cors({
 
 app.use(express.json());
 
-// Store connected users
+// Store connected users and their SSE responses
 const users = new Map();
 const waitingUsers = [];
-
-// Create WebSocket server
-const wss = new WebSocket.Server({ 
-  server,
-  path: '/ws'
-});
+const userConnections = new Map();
 
 // API health check
 app.get('/api/health', (req, res) => {
@@ -47,37 +40,47 @@ app.get('/', (req, res) => {
     message: 'WebRTC Chat Server is running',
     endpoints: {
       health: '/api/health',
-      websocket: '/ws'
+      events: '/api/events',
+      signaling: '/api/signal'
     },
     allowedOrigins: allowedOrigins
   });
 });
 
-// WebSocket connection handling
-wss.on('connection', (ws, req) => {
-  const userId = generateUserId();
-  console.log('User connected:', userId);
+// SSE endpoint for receiving events
+app.get('/api/events', (req, res) => {
+  const userId = req.query.userId;
   
-  // Add user to connected users
-  users.set(userId, { ws, partner: null });
-  
-  // Send user their ID
-  sendToUser(userId, { type: 'user-id', data: userId });
-  
-  // Try to pair users
-  pairUsers();
-  
-  ws.on('message', (message) => {
-    try {
-      const data = JSON.parse(message);
-      handleMessage(userId, data);
-    } catch (error) {
-      console.error('Error parsing message:', error);
-    }
+  if (!userId) {
+    return res.status(400).json({ error: 'User ID required' });
+  }
+
+  // Set headers for SSE
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Credentials': 'true'
   });
-  
-  ws.on('close', () => {
+
+  // Store the connection
+  userConnections.set(userId, res);
+
+  // Send initial connection confirmation
+  sendToUser(userId, { type: 'connected', data: { userId } });
+
+  // Add user to system if not already there
+  if (!users.has(userId)) {
+    users.set(userId, { partner: null });
+    waitingUsers.push(userId);
+    pairUsers();
+  }
+
+  // Handle client disconnect
+  req.on('close', () => {
     console.log('User disconnected:', userId);
+    userConnections.delete(userId);
     
     const user = users.get(userId);
     if (user && user.partner) {
@@ -88,33 +91,33 @@ wss.on('connection', (ws, req) => {
       const partner = users.get(user.partner);
       if (partner) {
         partner.partner = null;
-        // Add partner back to waiting list if they're still connected
         if (users.has(user.partner)) {
           waitingUsers.push(user.partner);
         }
       }
     }
     
-    // Remove user from all collections
     users.delete(userId);
     const waitingIndex = waitingUsers.indexOf(userId);
     if (waitingIndex > -1) {
       waitingUsers.splice(waitingIndex, 1);
     }
     
-    // Try to pair remaining users
     pairUsers();
-  });
-  
-  ws.on('error', (error) => {
-    console.error('WebSocket error for user', userId, ':', error);
   });
 });
 
-function handleMessage(userId, data) {
+// Signaling endpoint for WebRTC offers/answers/ice-candidates
+app.post('/api/signal', (req, res) => {
+  const { userId, type, data } = req.body;
+  
+  if (!userId || !type) {
+    return res.status(400).json({ error: 'User ID and type required' });
+  }
+
   const user = users.get(userId);
   
-  switch (data.type) {
+  switch (type) {
     case 'offer':
       if (user && user.partner) {
         sendToUser(user.partner, {
@@ -169,15 +172,27 @@ function handleMessage(userId, data) {
       }
       break;
       
-    default:
-      console.log('Unknown message type:', data.type);
+    case 'join':
+      if (!users.has(userId)) {
+        users.set(userId, { partner: null });
+        waitingUsers.push(userId);
+        pairUsers();
+      }
+      break;
   }
-}
+
+  res.json({ status: 'ok' });
+});
 
 function sendToUser(userId, message) {
-  const user = users.get(userId);
-  if (user && user.ws.readyState === WebSocket.OPEN) {
-    user.ws.send(JSON.stringify(message));
+  const connection = userConnections.get(userId);
+  if (connection && !connection.finished) {
+    try {
+      connection.write(`data: ${JSON.stringify(message)}\n\n`);
+    } catch (error) {
+      console.error('Error sending to user:', userId, error);
+      userConnections.delete(userId);
+    }
   }
 }
 
@@ -206,29 +221,22 @@ function pairUsers() {
       console.log(`Paired users: ${user1} with ${user2}`);
     }
   }
-  
-  // Add single user to waiting if not already there
-  users.forEach((userData, userId) => {
-    if (!userData.partner && !waitingUsers.includes(userId)) {
-      waitingUsers.push(userId);
-    }
-  });
 }
 
-function generateUserId() {
-  return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-}
+// Generate user ID endpoint
+app.get('/api/user-id', (req, res) => {
+  const userId = uuidv4();
+  res.json({ userId });
+});
 
 const PORT = process.env.PORT || 5000;
 
 // Export for Vercel
 module.exports = app;
 
-// Only listen if not in Vercel environment
 if (!process.env.VERCEL) {
-  server.listen(PORT, () => {
+  app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
-    console.log('WebSocket server running on path /ws');
     console.log('Allowed origins:', allowedOrigins);
   });
 }
