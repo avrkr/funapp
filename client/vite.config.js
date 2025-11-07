@@ -8,11 +8,15 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 3000
   },
-  define: {
-    'process.env': process.env
-  },
   build: {
     outDir: 'dist',
-    sourcemap: true
-  }
+    sourcemap: false,
+    rollupOptions: {
+      output: {
+        manualChunks: undefined,
+        inlineDynamicImports: false
+      }
+    }
+  },
+  base: './'
 })

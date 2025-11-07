@@ -12,11 +12,17 @@
   ],
   "routes": [
     {
+      "src": "/assets/(.*)",
+      "headers": {
+        "cache-control": "public, max-age=31536000, immutable"
+      }
+    },
+    {
       "src": "/(.*)",
       "dest": "/index.html"
     }
   ],
   "env": {
-    "VITE_SERVER_URL": "https://funapp-4kak2cmbk-vtu13429personal-9291s-projects.vercel.app"
+    "VITE_SERVER_URL": "https://funappbackend.vercel.app"
   }
 }
