@@ -16,7 +16,7 @@ function App() {
   const [socket, setSocket] = useState(null);
   const [userId, setUserId] = useState('');
   const [partnerId, setPartnerId] = useState('');
-  const [status, setStatus] = useState('Connecting to server...');
+  const [status, setStatus] = useState('Initializing...');
   const [isConnected, setIsConnected] = useState(false);
   
   const localVideoRef = useRef(null);
@@ -26,30 +26,46 @@ function App() {
   const socketRef = useRef(null);
 
   useEffect(() => {
-    // Use environment variable or fallback to your server URL
-    const serverUrl = import.meta.env.VITE_SERVER_URL || 
-                     'https://funapp-4kak2cmbk-vtu13429personal-9291s-projects.vercel.app';
+    initializeSocket();
+  }, []);
+
+  const initializeSocket = () => {
+    const serverUrl = 'https://funappbackend.vercel.app';
     
     console.log('Connecting to server:', serverUrl);
-    
+    setStatus('Connecting to server...');
+
+    // Create socket with explicit configuration
     const newSocket = io(serverUrl, {
-      transports: ['websocket', 'polling'],
-      path: '/socket.io/'
+      transports: ['polling', 'websocket'],
+      upgrade: true,
+      forceNew: true,
+      timeout: 10000,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000
     });
-    
+
     socketRef.current = newSocket;
     setSocket(newSocket);
 
     newSocket.on('connect', () => {
-      console.log('Connected to server successfully');
-      setStatus('Waiting for a partner...');
+      console.log('✅ Connected to server successfully');
+      setStatus('Connected! Waiting for a partner...');
       setIsConnected(true);
     });
 
     newSocket.on('connect_error', (error) => {
-      console.error('Connection error:', error);
-      setStatus('Connection failed. Retrying...');
+      console.error('❌ Connection error:', error);
+      setStatus(`Connection failed: ${error.message}. Retrying...`);
       setIsConnected(false);
+      
+      // Try to reconnect after 3 seconds
+      setTimeout(() => {
+        if (socketRef.current && !socketRef.current.connected) {
+          console.log('Attempting to reconnect...');
+          socketRef.current.connect();
+        }
+      }, 3000);
     });
 
     newSocket.on('user-id', (id) => {
@@ -58,28 +74,33 @@ function App() {
     });
 
     newSocket.on('user-connected', async (data) => {
+      console.log('Partner connected:', data.partnerId);
       setPartnerId(data.partnerId);
-      setStatus('Connected to partner!');
+      setStatus('Partner connected! Setting up video call...');
       await createPeerConnection();
       await createOffer();
     });
 
     newSocket.on('offer', async (data) => {
+      console.log('Received offer from:', data.from);
       setPartnerId(data.from);
-      setStatus('Partner joined!');
+      setStatus('Incoming call! Setting up video...');
       await createPeerConnection();
       await handleOffer(data.offer);
     });
 
     newSocket.on('answer', async (data) => {
+      console.log('Received answer from partner');
       await handleAnswer(data.answer);
     });
 
     newSocket.on('ice-candidate', async (data) => {
+      console.log('Received ICE candidate');
       await handleNewICECandidate(data.candidate);
     });
 
     newSocket.on('partner-disconnected', () => {
+      console.log('Partner disconnected');
       setStatus('Partner disconnected. Waiting for new partner...');
       setPartnerId('');
       if (peerConnectionRef.current) {
@@ -88,36 +109,50 @@ function App() {
       }
     });
 
-    newSocket.on('disconnect', () => {
+    newSocket.on('disconnect', (reason) => {
+      console.log('Disconnected from server:', reason);
       setStatus('Disconnected from server. Reconnecting...');
       setIsConnected(false);
     });
 
-    return () => {
-      newSocket.close();
-    };
-  }, []);
+    newSocket.on('reconnect', (attemptNumber) => {
+      console.log('Reconnected to server after', attemptNumber, 'attempts');
+      setStatus('Reconnected! Waiting for partner...');
+      setIsConnected(true);
+    });
+  };
 
   const initializeMedia = async () => {
     try {
+      setStatus('Requesting camera and microphone access...');
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true
+        }
       });
+      
       localStreamRef.current = stream;
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
       setStatus('Camera and microphone ready! Waiting for partner...');
+      return true;
     } catch (error) {
       console.error('Error accessing media devices:', error);
-      setStatus('Error accessing camera/microphone. Please check permissions.');
+      setStatus('Error: Cannot access camera/microphone. Please check permissions.');
+      return false;
     }
   };
 
   const createPeerConnection = async () => {
     if (!localStreamRef.current) {
-      await initializeMedia();
+      const mediaSuccess = await initializeMedia();
+      if (!mediaSuccess) return;
     }
 
     try {
@@ -134,6 +169,7 @@ function App() {
         if (remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = event.streams[0];
         }
+        setStatus('Video call connected!');
       };
 
       // Handle ICE candidates
@@ -146,18 +182,28 @@ function App() {
       };
 
       peerConnection.onconnectionstatechange = () => {
-        console.log('Connection state:', peerConnection.connectionState);
-        if (peerConnection.connectionState === 'connected') {
-          setStatus('Connected! Video chat is active.');
-        } else if (peerConnection.connectionState === 'disconnected') {
-          setStatus('Connection lost. Reconnecting...');
+        console.log('Peer connection state:', peerConnection.connectionState);
+        switch (peerConnection.connectionState) {
+          case 'connected':
+            setStatus('Video call connected!');
+            break;
+          case 'disconnected':
+          case 'failed':
+            setStatus('Connection issues. Trying to reconnect...');
+            break;
         }
       };
 
+      peerConnection.oniceconnectionstatechange = () => {
+        console.log('ICE connection state:', peerConnection.iceConnectionState);
+      };
+
       peerConnectionRef.current = peerConnection;
+      return true;
     } catch (error) {
       console.error('Error creating peer connection:', error);
       setStatus('Error setting up connection');
+      return false;
     }
   };
 
@@ -218,7 +264,7 @@ function App() {
     }
   };
 
-  const toggleMedia = async (type, enable) => {
+  const toggleMedia = (type, enable) => {
     if (!localStreamRef.current) return;
 
     const tracks = localStreamRef.current.getTracks();
@@ -229,6 +275,14 @@ function App() {
     });
   };
 
+  const reconnect = () => {
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current.connect();
+    }
+    initializeSocket();
+  };
+
   return (
     <div className="app">
       <div className="header">
@@ -237,7 +291,10 @@ function App() {
           <div className={`connection-status ${isConnected ? 'connected' : 'disconnected'}`}>
             {isConnected ? '● Connected' : '● Disconnected'}
           </div>
-          <div className="user-id">Your ID: {userId}</div>
+          <div className="user-id">Your ID: {userId || 'Connecting...'}</div>
+          <button onClick={reconnect} className="reconnect-btn">
+            🔄 Reconnect
+          </button>
         </div>
       </div>
 

@@ -21,8 +21,5 @@
       "src": "/(.*)",
       "dest": "/index.html"
     }
-  ],
-  "env": {
-    "VITE_SERVER_URL": "https://funappbackend.vercel.app"
-  }
+  ]
 }

@@ -8,38 +8,30 @@ const server = http.createServer(app);
 
 // Configure CORS for Vercel deployment
 const allowedOrigins = [
-  'https://funappmain.vercel.app',
-  'https://funapp-4kak2cmbk-vtu13429personal-9291s-projects.vercel.app',
+  'https://funapp-nu.vercel.app',
+  'https://funappbackend.vercel.app',
   'http://localhost:3000',
-  'http://localhost:5173',
-  process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null,
-].filter(Boolean);
+  'http://localhost:5173'
+];
 
 console.log('Allowed origins:', allowedOrigins);
 
 app.use(cors({
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    } else {
-      console.log('Blocked origin:', origin);
-      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
-      return callback(new Error(msg), false);
-    }
-  },
+  origin: allowedOrigins,
   credentials: true
 }));
 
+app.use(express.json());
+
+// Configure Socket.IO for Vercel
 const io = socketIo(server, {
   cors: {
     origin: allowedOrigins,
     methods: ["GET", "POST"],
     credentials: true
   },
-  transports: ['websocket', 'polling']
+  transports: ['polling', 'websocket'], // Try polling first
+  allowEIO3: true
 });
 
 // Store connected users
@@ -70,7 +62,7 @@ app.get('/', (req, res) => {
 
 // Socket.IO connection handling
 io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
+  console.log('User connected:', socket.id, 'Transport:', socket.conn.transport.name);
   
   // Add user to connected users
   users.set(socket.id, { socket, partner: null });
@@ -114,8 +106,8 @@ io.on('connection', (socket) => {
     }
   });
   
-  socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
+  socket.on('disconnect', (reason) => {
+    console.log('User disconnected:', socket.id, 'Reason:', reason);
     
     const user = users.get(socket.id);
     if (user && user.partner) {
@@ -161,6 +153,11 @@ io.on('connection', (socket) => {
       waitingUsers.push(socket.id);
       pairUsers();
     }
+  });
+
+  // Handle transport upgrade
+  socket.conn.on("upgrade", (transport) => {
+    console.log(`User ${socket.id} upgraded transport to:`, transport.name);
   });
 });
 
