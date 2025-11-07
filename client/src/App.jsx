@@ -161,11 +161,15 @@ function App() {
         break;
         
       case 'user-connected':
-        console.log('Partner connected:', data.data.partnerId);
+        console.log('Partner connected:', data.data.partnerId, 'initiator:', data.data.initiator);
         setPartnerId(data.data.partnerId);
         setStatus('Partner connected! Setting up video call...');
+        // Create peer connection for both sides, but only the designated
+        // initiator should create and send the offer. This prevents both
+        // peers from creating simultaneous offers which can produce the
+        // "Called in wrong state: stable" error when applying answers.
         createPeerConnection().then((success) => {
-          if (success) {
+          if (success && data.data && data.data.initiator) {
             createOffer();
           }
         });

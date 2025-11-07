@@ -356,15 +356,17 @@ async function pairUsers() {
       
       console.log(`Paired users: ${user1} with ${user2}`);
       
-      // Notify both users
+      // Notify both users. Designate one side as the initiator to avoid
+      // both clients creating an offer simultaneously (which leads to
+      // SDP/state collisions such as "Called in wrong state: stable").
       sendToUser(user1, { 
         type: 'user-connected', 
-        data: { partnerId: user2 } 
+        data: { partnerId: user2, initiator: true } 
       });
       
       sendToUser(user2, { 
         type: 'user-connected', 
-        data: { partnerId: user1 } 
+        data: { partnerId: user1, initiator: false } 
       });
     } catch (error) {
       console.error('Error pairing users:', error);
