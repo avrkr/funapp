@@ -155,7 +155,8 @@ function App() {
         console.log('Partner connected:', data.data.partnerId);
         setPartnerId(data.data.partnerId);
         setStatus('Partner connected! Setting up video call...');
-        createPeerConnection().then((success) => {
+        // Pass the current userId explicitly to ensure it's used for PC creation
+        createPeerConnection(userId).then((success) => {
           if (success) {
             createOffer();
           }
@@ -166,7 +167,8 @@ function App() {
         console.log('Received offer from:', data.data.from);
         setPartnerId(data.data.from);
         setStatus('Incoming call! Setting up video...');
-        createPeerConnection().then((success) => {
+        // Pass the current userId explicitly to ensure it's used for PC creation
+        createPeerConnection(userId).then((success) => {
           if (success) {
             handleOffer(data.data.offer);
           }
@@ -204,6 +206,7 @@ function App() {
     const currentUserId = targetUserId || userId;
     
     if (!currentUserId) {
+      // This is the error line
       console.error('No user ID available for sending signal');
       return;
     }
@@ -275,13 +278,21 @@ function App() {
     }
   };
 
-  const createPeerConnection = async () => {
+  // FIX: Accept the currentUserId as an argument to capture its value
+  const createPeerConnection = async (currentUserId) => { 
     // Clean up existing connection
     cleanupPeerConnection();
 
     if (!localStreamRef.current) {
       const mediaSuccess = await initializeMedia();
       if (!mediaSuccess) return false;
+    }
+    
+    // Safety check to ensure the ID is available for the closure
+    const pcUserId = currentUserId || userId;
+    if (!pcUserId) {
+        console.error("User ID not available to set up Peer Connection.");
+        return false;
     }
 
     try {
@@ -308,8 +319,8 @@ function App() {
       peerConnection.onicecandidate = (event) => {
         if (event.candidate) {
           console.log('Generated ICE candidate:', event.candidate.type);
-          // FIX: Pass userId explicitly to ensure it's available
-          sendSignal('ice-candidate', { candidate: event.candidate }, userId).catch(console.error);
+          // FIX APPLIED HERE: Use the captured 'pcUserId' for the synchronous callback.
+          sendSignal('ice-candidate', { candidate: event.candidate }, pcUserId).catch(console.error);
         } else {
           console.log('All ICE candidates generated');
         }
@@ -352,8 +363,8 @@ function App() {
   };
 
   const createOffer = async () => {
-    if (!peerConnectionRef.current) {
-      console.error('No peer connection available for offer');
+    if (!peerConnectionRef.current || !userId) {
+      console.error('No peer connection or user ID available for offer');
       return;
     }
 
@@ -368,7 +379,7 @@ function App() {
       await peerConnectionRef.current.setLocalDescription(offer);
       
       console.log('Sending offer to signaling server');
-      // FIX: Pass userId explicitly to ensure it's available
+      // The state 'userId' should be stable here, but we pass it explicitly.
       await sendSignal('offer', { offer: peerConnectionRef.current.localDescription }, userId);
     } catch (error) {
       console.error('Error creating offer:', error);
@@ -376,8 +387,8 @@ function App() {
   };
 
   const handleOffer = async (offer) => {
-    if (!peerConnectionRef.current) {
-      console.error('No peer connection available for handling offer');
+    if (!peerConnectionRef.current || !userId) {
+      console.error('No peer connection or user ID available for handling offer');
       return;
     }
 
@@ -395,7 +406,7 @@ function App() {
       await peerConnectionRef.current.setLocalDescription(answer);
       
       console.log('Sending answer to signaling server');
-      // FIX: Pass userId explicitly to ensure it's available
+      // The state 'userId' should be stable here, but we pass it explicitly.
       await sendSignal('answer', { answer: peerConnectionRef.current.localDescription }, userId);
     } catch (error) {
       console.error('Error handling offer:', error);
