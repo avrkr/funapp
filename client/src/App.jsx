@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-import io from 'socket.io-client';
 import './App.css';
 
 const ICE_SERVERS = {
@@ -13,7 +12,6 @@ const ICE_SERVERS = {
 };
 
 function App() {
-  const [socket, setSocket] = useState(null);
   const [userId, setUserId] = useState('');
   const [partnerId, setPartnerId] = useState('');
   const [status, setStatus] = useState('Initializing...');
@@ -23,103 +21,139 @@ function App() {
   const remoteVideoRef = useRef(null);
   const localStreamRef = useRef(null);
   const peerConnectionRef = useRef(null);
-  const socketRef = useRef(null);
+  const websocketRef = useRef(null);
+  const reconnectTimeoutRef = useRef(null);
 
   useEffect(() => {
-    initializeSocket();
-  }, []);
-
-  const initializeSocket = () => {
-    const serverUrl = 'https://funappbackend.vercel.app';
+    connectWebSocket();
     
-    console.log('Connecting to server:', serverUrl);
-    setStatus('Connecting to server...');
-
-    // Create socket with explicit configuration
-    const newSocket = io(serverUrl, {
-      transports: ['polling', 'websocket'],
-      upgrade: true,
-      forceNew: true,
-      timeout: 10000,
-      reconnectionAttempts: 5,
-      reconnectionDelay: 1000
-    });
-
-    socketRef.current = newSocket;
-    setSocket(newSocket);
-
-    newSocket.on('connect', () => {
-      console.log('✅ Connected to server successfully');
-      setStatus('Connected! Waiting for a partner...');
-      setIsConnected(true);
-    });
-
-    newSocket.on('connect_error', (error) => {
-      console.error('❌ Connection error:', error);
-      setStatus(`Connection failed: ${error.message}. Retrying...`);
-      setIsConnected(false);
-      
-      // Try to reconnect after 3 seconds
-      setTimeout(() => {
-        if (socketRef.current && !socketRef.current.connected) {
-          console.log('Attempting to reconnect...');
-          socketRef.current.connect();
-        }
-      }, 3000);
-    });
-
-    newSocket.on('user-id', (id) => {
-      setUserId(id);
-      console.log('User ID received:', id);
-    });
-
-    newSocket.on('user-connected', async (data) => {
-      console.log('Partner connected:', data.partnerId);
-      setPartnerId(data.partnerId);
-      setStatus('Partner connected! Setting up video call...');
-      await createPeerConnection();
-      await createOffer();
-    });
-
-    newSocket.on('offer', async (data) => {
-      console.log('Received offer from:', data.from);
-      setPartnerId(data.from);
-      setStatus('Incoming call! Setting up video...');
-      await createPeerConnection();
-      await handleOffer(data.offer);
-    });
-
-    newSocket.on('answer', async (data) => {
-      console.log('Received answer from partner');
-      await handleAnswer(data.answer);
-    });
-
-    newSocket.on('ice-candidate', async (data) => {
-      console.log('Received ICE candidate');
-      await handleNewICECandidate(data.candidate);
-    });
-
-    newSocket.on('partner-disconnected', () => {
-      console.log('Partner disconnected');
-      setStatus('Partner disconnected. Waiting for new partner...');
-      setPartnerId('');
+    return () => {
+      if (websocketRef.current) {
+        websocketRef.current.close();
+      }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
       if (peerConnectionRef.current) {
         peerConnectionRef.current.close();
-        peerConnectionRef.current = null;
       }
-    });
+    };
+  }, []);
 
-    newSocket.on('disconnect', (reason) => {
-      console.log('Disconnected from server:', reason);
-      setStatus('Disconnected from server. Reconnecting...');
-      setIsConnected(false);
-    });
+  const connectWebSocket = () => {
+    const serverUrl = 'wss://funappbackend.vercel.app/ws';
+    
+    console.log('Connecting to WebSocket:', serverUrl);
+    setStatus('Connecting to server...');
 
-    newSocket.on('reconnect', (attemptNumber) => {
-      console.log('Reconnected to server after', attemptNumber, 'attempts');
-      setStatus('Reconnected! Waiting for partner...');
-      setIsConnected(true);
-    });
+    try {
+      const ws = new WebSocket(serverUrl);
+      websocketRef.current = ws;
+
+      ws.onopen = () => {
+        console.log('✅ WebSocket connected successfully');
+        setStatus('Connected! Waiting for a partner...');
+        setIsConnected(true);
+        
+        // Clear any reconnect timeout
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = null;
+        }
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          handleWebSocketMessage(data);
+        } catch (error) {
+          console.error('Error parsing WebSocket message:', error);
+        }
+      };
+
+      ws.onclose = (event) => {
+        console.log('WebSocket closed:', event.code, event.reason);
+        setStatus('Disconnected from server. Reconnecting...');
+        setIsConnected(false);
+        
+        // Attempt to reconnect after 3 seconds
+        if (!reconnectTimeoutRef.current) {
+          reconnectTimeoutRef.current = setTimeout(() => {
+            console.log('Attempting to reconnect...');
+            reconnectTimeoutRef.current = null;
+            connectWebSocket();
+          }, 3000);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        setStatus('Connection error. Retrying...');
+        setIsConnected(false);
+      };
+
+    } catch (error) {
+      console.error('Error creating WebSocket:', error);
+      setStatus('Failed to connect. Retrying...');
+      
+      // Retry after 3 seconds
+      reconnectTimeoutRef.current = setTimeout(() => {
+        reconnectTimeoutRef.current = null;
+        connectWebSocket();
+      }, 3000);
+    }
+  };
+
+  const handleWebSocketMessage = (data) => {
+    switch (data.type) {
+      case 'user-id':
+        setUserId(data.data);
+        console.log('User ID received:', data.data);
+        break;
+        
+      case 'user-connected':
+        console.log('Partner connected:', data.data.partnerId);
+        setPartnerId(data.data.partnerId);
+        setStatus('Partner connected! Setting up video call...');
+        createPeerConnection().then(() => createOffer());
+        break;
+        
+      case 'offer':
+        console.log('Received offer from:', data.data.from);
+        setPartnerId(data.data.from);
+        setStatus('Incoming call! Setting up video...');
+        createPeerConnection().then(() => handleOffer(data.data.offer));
+        break;
+        
+      case 'answer':
+        console.log('Received answer from partner');
+        handleAnswer(data.data.answer);
+        break;
+        
+      case 'ice-candidate':
+        console.log('Received ICE candidate');
+        handleNewICECandidate(data.data.candidate);
+        break;
+        
+      case 'partner-disconnected':
+        console.log('Partner disconnected');
+        setStatus('Partner disconnected. Waiting for new partner...');
+        setPartnerId('');
+        if (peerConnectionRef.current) {
+          peerConnectionRef.current.close();
+          peerConnectionRef.current = null;
+        }
+        break;
+        
+      default:
+        console.log('Unknown message type:', data.type);
+    }
+  };
+
+  const sendWebSocketMessage = (message) => {
+    if (websocketRef.current && websocketRef.current.readyState === WebSocket.OPEN) {
+      websocketRef.current.send(JSON.stringify(message));
+    }
   };
 
   const initializeMedia = async () => {
@@ -152,7 +186,7 @@ function App() {
   const createPeerConnection = async () => {
     if (!localStreamRef.current) {
       const mediaSuccess = await initializeMedia();
-      if (!mediaSuccess) return;
+      if (!mediaSuccess) return false;
     }
 
     try {
@@ -174,8 +208,9 @@ function App() {
 
       // Handle ICE candidates
       peerConnection.onicecandidate = (event) => {
-        if (event.candidate && socketRef.current) {
-          socketRef.current.emit('ice-candidate', {
+        if (event.candidate) {
+          sendWebSocketMessage({
+            type: 'ice-candidate',
             candidate: event.candidate
           });
         }
@@ -194,10 +229,6 @@ function App() {
         }
       };
 
-      peerConnection.oniceconnectionstatechange = () => {
-        console.log('ICE connection state:', peerConnection.iceConnectionState);
-      };
-
       peerConnectionRef.current = peerConnection;
       return true;
     } catch (error) {
@@ -213,7 +244,10 @@ function App() {
     try {
       const offer = await peerConnectionRef.current.createOffer();
       await peerConnectionRef.current.setLocalDescription(offer);
-      socketRef.current.emit('offer', { offer });
+      sendWebSocketMessage({
+        type: 'offer',
+        offer: offer
+      });
     } catch (error) {
       console.error('Error creating offer:', error);
     }
@@ -226,7 +260,10 @@ function App() {
       await peerConnectionRef.current.setRemoteDescription(offer);
       const answer = await peerConnectionRef.current.createAnswer();
       await peerConnectionRef.current.setLocalDescription(answer);
-      socketRef.current.emit('answer', { answer });
+      sendWebSocketMessage({
+        type: 'answer',
+        answer: answer
+      });
     } catch (error) {
       console.error('Error handling offer:', error);
     }
@@ -253,14 +290,12 @@ function App() {
   };
 
   const handleNextUser = () => {
-    if (socketRef.current) {
-      socketRef.current.emit('next-user');
-      setStatus('Looking for next user...');
-      setPartnerId('');
-      if (peerConnectionRef.current) {
-        peerConnectionRef.current.close();
-        peerConnectionRef.current = null;
-      }
+    sendWebSocketMessage({ type: 'next-user' });
+    setStatus('Looking for next user...');
+    setPartnerId('');
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
     }
   };
 
@@ -276,11 +311,10 @@ function App() {
   };
 
   const reconnect = () => {
-    if (socketRef.current) {
-      socketRef.current.disconnect();
-      socketRef.current.connect();
+    if (websocketRef.current) {
+      websocketRef.current.close();
     }
-    initializeSocket();
+    connectWebSocket();
   };
 
   return (

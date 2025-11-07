@@ -1,20 +1,18 @@
 const express = require('express');
 const http = require('http');
-const socketIo = require('socket.io');
+const WebSocket = require('ws');
 const cors = require('cors');
 
 const app = express();
 const server = http.createServer(app);
 
-// Configure CORS for Vercel deployment
+// Configure CORS
 const allowedOrigins = [
   'https://funapp-nu.vercel.app',
   'https://funappbackend.vercel.app',
   'http://localhost:3000',
   'http://localhost:5173'
 ];
-
-console.log('Allowed origins:', allowedOrigins);
 
 app.use(cors({
   origin: allowedOrigins,
@@ -23,20 +21,15 @@ app.use(cors({
 
 app.use(express.json());
 
-// Configure Socket.IO for Vercel
-const io = socketIo(server, {
-  cors: {
-    origin: allowedOrigins,
-    methods: ["GET", "POST"],
-    credentials: true
-  },
-  transports: ['polling', 'websocket'], // Try polling first
-  allowEIO3: true
-});
-
 // Store connected users
 const users = new Map();
 const waitingUsers = [];
+
+// Create WebSocket server
+const wss = new WebSocket.Server({ 
+  server,
+  path: '/ws'
+});
 
 // API health check
 app.get('/api/health', (req, res) => {
@@ -54,65 +47,42 @@ app.get('/', (req, res) => {
     message: 'WebRTC Chat Server is running',
     endpoints: {
       health: '/api/health',
-      websocket: '/socket.io/'
+      websocket: '/ws'
     },
     allowedOrigins: allowedOrigins
   });
 });
 
-// Socket.IO connection handling
-io.on('connection', (socket) => {
-  console.log('User connected:', socket.id, 'Transport:', socket.conn.transport.name);
+// WebSocket connection handling
+wss.on('connection', (ws, req) => {
+  const userId = generateUserId();
+  console.log('User connected:', userId);
   
   // Add user to connected users
-  users.set(socket.id, { socket, partner: null });
+  users.set(userId, { ws, partner: null });
   
   // Send user their ID
-  socket.emit('user-id', socket.id);
+  sendToUser(userId, { type: 'user-id', data: userId });
   
   // Try to pair users
   pairUsers();
   
-  // Handle WebRTC signaling
-  socket.on('offer', (data) => {
-    const user = users.get(socket.id);
-    if (user && user.partner) {
-      console.log(`Offer from ${socket.id} to ${user.partner}`);
-      io.to(user.partner).emit('offer', {
-        offer: data.offer,
-        from: socket.id
-      });
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+      handleMessage(userId, data);
+    } catch (error) {
+      console.error('Error parsing message:', error);
     }
   });
   
-  socket.on('answer', (data) => {
-    const user = users.get(socket.id);
-    if (user && user.partner) {
-      console.log(`Answer from ${socket.id} to ${user.partner}`);
-      io.to(user.partner).emit('answer', {
-        answer: data.answer,
-        from: socket.id
-      });
-    }
-  });
-  
-  socket.on('ice-candidate', (data) => {
-    const user = users.get(socket.id);
-    if (user && user.partner) {
-      io.to(user.partner).emit('ice-candidate', {
-        candidate: data.candidate,
-        from: socket.id
-      });
-    }
-  });
-  
-  socket.on('disconnect', (reason) => {
-    console.log('User disconnected:', socket.id, 'Reason:', reason);
+  ws.on('close', () => {
+    console.log('User disconnected:', userId);
     
-    const user = users.get(socket.id);
+    const user = users.get(userId);
     if (user && user.partner) {
       // Notify partner about disconnect
-      io.to(user.partner).emit('partner-disconnected');
+      sendToUser(user.partner, { type: 'partner-disconnected' });
       
       // Remove partner reference
       const partner = users.get(user.partner);
@@ -126,8 +96,8 @@ io.on('connection', (socket) => {
     }
     
     // Remove user from all collections
-    users.delete(socket.id);
-    const waitingIndex = waitingUsers.indexOf(socket.id);
+    users.delete(userId);
+    const waitingIndex = waitingUsers.indexOf(userId);
     if (waitingIndex > -1) {
       waitingUsers.splice(waitingIndex, 1);
     }
@@ -136,30 +106,80 @@ io.on('connection', (socket) => {
     pairUsers();
   });
   
-  socket.on('next-user', () => {
-    const user = users.get(socket.id);
-    if (user && user.partner) {
-      // Notify current partner
-      io.to(user.partner).emit('partner-disconnected');
-      
-      // Remove partnership
-      const partner = users.get(user.partner);
-      if (partner) {
-        partner.partner = null;
-        waitingUsers.push(user.partner);
-      }
-      
-      user.partner = null;
-      waitingUsers.push(socket.id);
-      pairUsers();
-    }
-  });
-
-  // Handle transport upgrade
-  socket.conn.on("upgrade", (transport) => {
-    console.log(`User ${socket.id} upgraded transport to:`, transport.name);
+  ws.on('error', (error) => {
+    console.error('WebSocket error for user', userId, ':', error);
   });
 });
+
+function handleMessage(userId, data) {
+  const user = users.get(userId);
+  
+  switch (data.type) {
+    case 'offer':
+      if (user && user.partner) {
+        sendToUser(user.partner, {
+          type: 'offer',
+          data: {
+            offer: data.offer,
+            from: userId
+          }
+        });
+      }
+      break;
+      
+    case 'answer':
+      if (user && user.partner) {
+        sendToUser(user.partner, {
+          type: 'answer',
+          data: {
+            answer: data.answer,
+            from: userId
+          }
+        });
+      }
+      break;
+      
+    case 'ice-candidate':
+      if (user && user.partner) {
+        sendToUser(user.partner, {
+          type: 'ice-candidate',
+          data: {
+            candidate: data.candidate,
+            from: userId
+          }
+        });
+      }
+      break;
+      
+    case 'next-user':
+      if (user && user.partner) {
+        // Notify current partner
+        sendToUser(user.partner, { type: 'partner-disconnected' });
+        
+        // Remove partnership
+        const partner = users.get(user.partner);
+        if (partner) {
+          partner.partner = null;
+          waitingUsers.push(user.partner);
+        }
+        
+        user.partner = null;
+        waitingUsers.push(userId);
+        pairUsers();
+      }
+      break;
+      
+    default:
+      console.log('Unknown message type:', data.type);
+  }
+}
+
+function sendToUser(userId, message) {
+  const user = users.get(userId);
+  if (user && user.ws.readyState === WebSocket.OPEN) {
+    user.ws.send(JSON.stringify(message));
+  }
+}
 
 function pairUsers() {
   while (waitingUsers.length >= 2) {
@@ -173,8 +193,15 @@ function pairUsers() {
       user1Data.partner = user2;
       user2Data.partner = user1;
       
-      io.to(user1).emit('user-connected', { partnerId: user2 });
-      io.to(user2).emit('user-connected', { partnerId: user1 });
+      sendToUser(user1, { 
+        type: 'user-connected', 
+        data: { partnerId: user2 } 
+      });
+      
+      sendToUser(user2, { 
+        type: 'user-connected', 
+        data: { partnerId: user1 } 
+      });
       
       console.log(`Paired users: ${user1} with ${user2}`);
     }
@@ -188,6 +215,10 @@ function pairUsers() {
   });
 }
 
+function generateUserId() {
+  return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+}
+
 const PORT = process.env.PORT || 5000;
 
 // Export for Vercel
@@ -197,6 +228,7 @@ module.exports = app;
 if (!process.env.VERCEL) {
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    console.log('WebSocket server running on path /ws');
     console.log('Allowed origins:', allowedOrigins);
   });
 }
